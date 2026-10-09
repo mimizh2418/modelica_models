@@ -12,7 +12,7 @@ protected
     maxWaypoints = maxWaypoints,
     samplePeriod = planningPeriod);
   Vehicles.Rdd2.GuidanceController guidanceTask(
-    samplePeriod = guidancePeriod);
+    samplePeriod = guidancePeriod, inertia = rateTask.inertia);
   Vehicles.Rdd2.RateControlAllocator rateTask(
     samplePeriod = ratePeriod);
   // Both trajectory sources are the same deployable task on the same clock,
@@ -96,13 +96,21 @@ equation
   guidanceTask.reference.positionWorld_m = reference.position;
   guidanceTask.reference.velocityWorld_m_s = reference.velocity;
   guidanceTask.reference.accelerationWorld_m_s2 = reference.acceleration;
+  guidanceTask.reference.jerkWorld_m_s3 = reference.jerk;
+  guidanceTask.reference.snapWorld_m_s4 = reference.snap;
   guidanceTask.reference.yaw_rad = reference.yaw;
+  guidanceTask.reference.yawRate_rad_s = reference.yawRate;
+  guidanceTask.reference.yawAcceleration_rad_s2 = reference.yawAcceleration;
 
   // Rate control shares the fast device thread with IMU input and motor I/O.
   rateTask.inputSignal.armed = armed;
   rateTask.inputSignal.thrust_N = guidanceTask.rateCommand.thrust_N;
   rateTask.inputSignal.angularVelocityCommandFlu_rad_s =
     guidanceTask.rateCommand.angularVelocityCommandFlu_rad_s;
+  rateTask.inputSignal.angularVelocityFeedforwardFlu_rad_s =
+    guidanceTask.rateCommand.angularVelocityFeedforwardFlu_rad_s;
+  rateTask.inputSignal.angularAccelerationFeedforwardFlu_rad_s2 =
+    guidanceTask.rateCommand.angularAccelerationFeedforwardFlu_rad_s2;
   rateTask.inputSignal.angularVelocityMeasuredFlu_rad_s =
     navigation.angularVelocityBodyFlu_rad_s;
   motorCommands.motor = rateTask.commands.motor;

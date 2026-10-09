@@ -23,7 +23,8 @@ block Controller
   Interfaces.TelemetrySource telemetry;
 
 protected
-  GuidanceController guidanceTask(samplePeriod = guidancePeriod);
+  GuidanceController guidanceTask(
+    samplePeriod = guidancePeriod, inertia = rateTask.inertia);
   RateControlAllocator rateTask(samplePeriod = samplePeriod);
 
 equation
@@ -34,11 +35,7 @@ equation
   guidanceTask.navigation.positionWorldEnu_m = navigation.positionWorldEnu_m;
   guidanceTask.navigation.velocityWorldEnu_m_s = navigation.velocityWorldEnu_m_s;
   guidanceTask.navigation.quaternionWorldBody = navigation.quaternionWorldBody;
-  guidanceTask.reference.positionWorld_m = reference.positionWorld_m;
-  guidanceTask.reference.velocityWorld_m_s = reference.velocityWorld_m_s;
-  guidanceTask.reference.accelerationWorld_m_s2 =
-    reference.accelerationWorld_m_s2;
-  guidanceTask.reference.yaw_rad = reference.yaw_rad;
+  connect(reference, guidanceTask.reference);
   pilotCommands.throttleInput =
     guidanceTask.pilotCommands.throttleInput;
   pilotCommands.acroRateDesired_rad_s =
@@ -50,6 +47,10 @@ equation
   rateTask.inputSignal.thrust_N = guidanceTask.rateCommand.thrust_N;
   rateTask.inputSignal.angularVelocityCommandFlu_rad_s =
     guidanceTask.rateCommand.angularVelocityCommandFlu_rad_s;
+  rateTask.inputSignal.angularVelocityFeedforwardFlu_rad_s =
+    guidanceTask.rateCommand.angularVelocityFeedforwardFlu_rad_s;
+  rateTask.inputSignal.angularAccelerationFeedforwardFlu_rad_s2 =
+    guidanceTask.rateCommand.angularAccelerationFeedforwardFlu_rad_s2;
   rateTask.inputSignal.angularVelocityMeasuredFlu_rad_s =
     navigation.angularVelocityBodyFlu_rad_s;
   motorCommands.motor = rateTask.commands.motor;

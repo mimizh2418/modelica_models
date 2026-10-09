@@ -31,7 +31,11 @@ connector TrajectoryReferenceInput
   input Real positionWorld_m[3];
   input Real velocityWorld_m_s[3];
   input Real accelerationWorld_m_s2[3];
+  input Real jerkWorld_m_s3[3](each unit = "m/s3");
+  input Real snapWorld_m_s4[3](each unit = "m/s4");
   input Real yaw_rad;
+  input Real yawRate_rad_s(unit = "rad/s");
+  input Real yawAcceleration_rad_s2(unit = "rad/s2");
 end TrajectoryReferenceInput;
 
 connector GuidanceStateInput
@@ -47,6 +51,10 @@ connector RateControlInput
   input Boolean armed;
   input Real thrust_N;
   input Real angularVelocityCommandFlu_rad_s[3];
+  input Real angularVelocityFeedforwardFlu_rad_s[3](each unit = "rad/s")
+    "Nominal reference rate expressed in the actual body FLU frame";
+  input Real angularAccelerationFeedforwardFlu_rad_s2[3](each unit = "rad/s2")
+    "Nominal reference acceleration rotated into actual body FLU; rate task applies transport";
   input Real angularVelocityMeasuredFlu_rad_s[3];
 end RateControlInput;
 
@@ -54,12 +62,16 @@ connector RateCommand
   "Body-rate and collective-thrust message produced by guidance"
   output Real thrust_N;
   output Real angularVelocityCommandFlu_rad_s[3];
+  output Real angularVelocityFeedforwardFlu_rad_s[3](each unit = "rad/s");
+  output Real angularAccelerationFeedforwardFlu_rad_s2[3](each unit = "rad/s2");
 end RateCommand;
 
 connector RateCommandInput
   "Body-rate and collective-thrust message consumed by rate control"
   input Real thrust_N;
   input Real angularVelocityCommandFlu_rad_s[3];
+  input Real angularVelocityFeedforwardFlu_rad_s[3](each unit = "rad/s");
+  input Real angularAccelerationFeedforwardFlu_rad_s2[3](each unit = "rad/s2");
 end RateCommandInput;
 
 connector TelemetrySource

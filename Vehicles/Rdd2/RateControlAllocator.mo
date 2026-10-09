@@ -57,7 +57,11 @@ algorithm
       inputSignal.angularVelocityCommandFlu_rad_s,
       inputSignal.angularVelocityMeasuredFlu_rad_s,
       inertia,
-      rateGain);
+      rateGain,
+      angularAccelerationFeedforward =
+        inputSignal.angularAccelerationFeedforwardFlu_rad_s2,
+      angularVelocityFeedforward =
+        inputSignal.angularVelocityFeedforwardFlu_rad_s);
     momentBodyFlu_Nm := {
       MathUtilities.clip(unboundedMomentBodyFlu_Nm[1],
         -maximumBodyMoment_Nm[1], maximumBodyMoment_Nm[1]),

@@ -48,6 +48,12 @@ opticalFlowRangeJacobian
 correctOpticalFlow
 navigationEstimate
 nominalStateFinite
+initializeFromAiding
+predictTick
+reseedFromAnchor
+correctAbsoluteAiding
+correctIndependentAiding
+correctSyntheticAiding
 step
 Estimator
 withCovarianceRoot

@@ -87,12 +87,15 @@ model SensorCorrectionTests
       "Terrain variance did not contract after a valid range observation");
 
     predicted := Estimation.StrapdownINS.ESKF.State(
+      barometerBiasCrossCovariance=zeros(15),
+      barometerBias_m=0.0, barometerBiasVariance_m2=0.0, useJointBarometerBias=false,
       positionWorldEnu_m={0.0, 0.0, 2.0},
       velocityWorldEnu_m_s={1.0, 0.0, 0.0},
       quaternionWorldBody={1.0, 0.0, 0.0, 0.0},
       gyroscopeBiasBodyFlu_rad_s=zeros(3),
       accelerometerBiasBodyFlu_m_s2=zeros(3),
-      covariance=covariance);
+      covariance=covariance,
+        useSquareRootCovariance=false, covarianceRoot=zeros(15, 15));
     flowNear := Avionics.OpticalFlowSample(
       valid=true, fresh=true, timestamp_s=0.0,
       integratedLineOfSight_rad={0.0, 0.005},
@@ -201,12 +204,15 @@ model SensorCorrectionTests
     mocapAge_s := 0.02;
     mocapVelocity_m_s := {5.0, 0.0, 0.0};
     agedPrior := Estimation.StrapdownINS.ESKF.State(
+      barometerBiasCrossCovariance=zeros(15),
+      barometerBias_m=0.0, barometerBiasVariance_m2=0.0, useJointBarometerBias=false,
       positionWorldEnu_m={10.0, 0.0, 2.0},
       velocityWorldEnu_m_s=mocapVelocity_m_s,
       quaternionWorldBody={1.0, 0.0, 0.0, 0.0},
       gyroscopeBiasBodyFlu_rad_s=zeros(3),
       accelerometerBiasBodyFlu_m_s2=zeros(3),
-      covariance=identity(15));
+      covariance=identity(15),
+        useSquareRootCovariance=false, covarianceRoot=zeros(15, 15));
     agedMocap := Avionics.MocapSample(
       valid=true,
       fresh=true,

@@ -45,21 +45,27 @@ algorithm
 
     chain := Tests.RuleChecks.retrodictChain(
       Estimation.StrapdownINS.ESKF.State(
+        barometerBiasCrossCovariance=zeros(15),
+        barometerBias_m=0.0, barometerBiasVariance_m2=0.0, useJointBarometerBias=false,
         positionWorldEnu_m = position,
         velocityWorldEnu_m_s = velocity,
         quaternionWorldBody = quaternion,
         gyroscopeBiasBodyFlu_rad_s = gyroscopeBias,
         accelerometerBiasBodyFlu_m_s2 = accelerometerBias,
-        covariance = zeros(15, 15)),
+        covariance = zeros(15, 15),
+        useSquareRootCovariance=false, covarianceRoot=zeros(15, 15)),
       angularVelocity, specificForce, gravity, age_s);
     difference := Tests.RuleChecks.fdRetrodictJacobian(
       Estimation.StrapdownINS.ESKF.State(
+        barometerBiasCrossCovariance=zeros(15),
+        barometerBias_m=0.0, barometerBiasVariance_m2=0.0, useJointBarometerBias=false,
         positionWorldEnu_m = position,
         velocityWorldEnu_m_s = velocity,
         quaternionWorldBody = quaternion,
         gyroscopeBiasBodyFlu_rad_s = gyroscopeBias,
         accelerometerBiasBodyFlu_m_s2 = accelerometerBias,
-        covariance = zeros(15, 15)),
+        covariance = zeros(15, 15),
+        useSquareRootCovariance=false, covarianceRoot=zeros(15, 15)),
       angularVelocity, specificForce, gravity, age_s, step);
     constructed := Estimation.StrapdownINS.ESKF.discreteTransition(
       Estimation.StrapdownINS.ESKF.continuousTransition(

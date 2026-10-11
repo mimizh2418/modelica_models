@@ -4,6 +4,23 @@ block Estimator
   "Sampled aided strapdown inertial-navigation ESKF"
   extends Estimation.StrapdownINS.PartialEstimator;
 
+  parameter Boolean useSemiDirectBias = false;
+  parameter Boolean useStationaryImu = false;
+  parameter Boolean useSquareRootCovariance = false;
+  output Real errorCovarianceRoot[15, 15](each start=0, each fixed=true);
+  output Boolean stationaryImuCorrectionAccepted(start = false, fixed = true);
+  input Boolean vehicleAtRest = false;
+  parameter Boolean useDeclaredRestBarometerCalibration = false;
+  parameter Boolean useBarometerBiasConsider = false;
+  parameter Boolean useJointBarometerBias = false;
+  output Real barometerBiasCrossCovariance[15](each start=0, each fixed=true);
+  parameter Real stationaryVelocityVariance_m2_s2(unit = "m2/s2") = 0.01;
+
+  parameter Boolean useEquivariantMagnetometer = false
+    "Fuse a calibrated local magnetic field vector with symmetric SO(3) linearization";
+  parameter Boolean useGeometricAlignment = false
+    "Condition startup uncertainty on the vectors used for quiet alignment";
+
   // Consistency instrumentation (NEES/NIS study): mirror the full
   // error-state covariance and the bias estimates as public outputs so
   // a mission-level consistency evaluation can be post-processed from
@@ -18,8 +35,8 @@ block Estimator
     each start = 0.0, each fixed = true)
     "Accelerometer bias estimate, mirrored each estimator tick";
 
-  parameter Estimation.StrapdownINS.ESKF.VarianceLimits varianceLimits =
-    Estimation.StrapdownINS.ESKF.VarianceLimits(
+  parameter VarianceLimits varianceLimits =
+    VarianceLimits(
       position_m2=fill(1.0e4, 3),
       velocity_m2_s2=fill(4.0e2, 3),
       attitude_rad2=fill(10.0, 3),
@@ -108,6 +125,71 @@ block Estimator
      permanently valid and never fresh. 0.5 s spans ten intervals of the
      slowest aiding rate this block is specified for while still demoting
      a genuinely stalled source well inside the divergence window.";
+  parameter Real aidingReseedWindow_s(unit = "s") = 0.0
+    "Unbroken wall-clock time the anchor source has been unable to move the
+     state after which, on the next fresh finite anchor sample, the
+     estimator re-seeds position (and velocity from a GPS sample that
+     reports it) from that sample and restores the position and velocity
+     covariance to the initial variances. It keeps attitude and the bias
+     states.
+
+     DISABLED BY DEFAULT: non-positive turns re-seeding off, which is the
+     value carried here so every pinned test and witness trace keeps its
+     behaviour. When enabled it must be finite and exceed
+     aidingDivergentWindow_s, so a re-seed happens only after the gentler
+     covariance-inflation stage has been given the whole divergence window
+     to readmit the anchor on its own. A deployment that wants automatic
+     recovery from a sustained outage sets this positive on the extends
+     clause, as Vehicles.Rdd2.NavigationEstimator does. An unusable value
+     disables only the re-seed and leaves the rest of the ladder in force.";
+  parameter Real initialAlignmentWindow_s(unit = "s") = 0.0
+    "Unbroken quasi-static time the IMU must report before the filter aligns
+     its initial attitude from the specific force. A vehicle that boots while
+     being carried, or whose inertial stream has not settled, is not leveled
+     on that sample; it stays uninitialized until it has rested this long.
+     Without GNSS or mocap nothing later can observe a tilt taken at
+     alignment, which is how a wrong start becomes an unbounded velocity.
+     DISABLED BY DEFAULT: non-positive aligns on the first usable sample, the
+     value carried here so every pinned test and witness trace keeps its
+     behaviour. Vehicles.Rdd2.NavigationEstimator sets it on the extends
+     clause. When the window is enabled a filter without a magnetometer
+     levels on the specific force with the heading left at zero instead of
+     taking the configured initial quaternion.";
+  parameter Real initialAlignmentTimeout_s(unit = "s") = 0.0
+    "Time with a usable IMU after which a pending alignment is taken on the
+     current sample even though the vehicle never held still for the window,
+     so a vibrating airframe or an out-of-scale sensor still gets a filter.
+     Non-positive waits indefinitely. Only meaningful with
+     initialAlignmentWindow_s enabled; RDD2 uses 5 s.";
+  parameter Real quietSpecificForceTolerance_m_s2(unit = "m/s2") = 0.5
+    "How far the specific-force magnitude may differ from gravity while the
+     vehicle still counts as quasi-static: about 0.05 g, above MEMS noise and
+     motor vibration at rest, below any real acceleration.";
+  parameter Real quietAngularRateLimit_rad_s(unit = "rad/s") = 0.1
+    "Angular-rate magnitude below which the vehicle counts as quasi-static,
+     about six degrees per second.";
+  parameter Real quietFilterTimeConstant_s(unit = "s") = 0.15
+    "Time constant of the first-order low-pass the quasi-static test and the
+     accelerometer alignment read the IMU through. A resting vehicle whose
+     sensor puts several m/s2 of noise on each sample still passes the test
+     once the filter has settled, about three time constants after the first
+     usable sample. Non-positive reads the raw samples.";
+  parameter Real pseudoPositionVariance_m2(unit = "m2") = 0.0
+    "Per-axis variance of the synthetic hold-position measurement fused on
+     every tick that no anchor source is live and no real sensor was fused.
+     It holds the filter to the last position it had while aided (or the
+     initialization position) with a large uncertainty, the fake-position
+     fusion of the PX4 and ArduPilot filters, so a tilt error cannot
+     integrate into an unbounded velocity that gates every later measurement
+     out. DISABLED BY DEFAULT: non-positive turns it off. RDD2 uses 100
+     (10 m sigma).";
+  parameter Real zeroVelocityVariance_m2_s2(unit = "m2/s2") = 0.0
+    "Per-axis variance of the synthetic zero-velocity measurement fused while
+     the vehicle is quasi-static and no anchor source is live. Through the
+     velocity-attitude cross covariance this is the update that makes a tilt
+     error observable on a vehicle at rest with nothing else to aid it.
+     DISABLED BY DEFAULT: non-positive turns it off. RDD2 uses 0.09 (0.3 m/s
+     sigma), loose enough that a slowly drifting unaided hover is not pinned.";
 
 protected
   discrete Real statePosition[3](each start = 0.0, each fixed = true);
@@ -116,7 +198,10 @@ protected
     start = {1.0, 0.0, 0.0, 0.0}, each fixed = true);
   discrete Real stateGyroscopeBias[3](each start = 0.0, each fixed = true);
   discrete Real stateAccelerometerBias[3](each start = 0.0, each fixed = true);
+  discrete Real stateCovarianceRoot[15, 15](each start=0, each fixed=true);
   discrete Real stateCovariance[15, 15](each start = 0.0, each fixed = true);
+  Real barometerObservationBiasVariance_m2;
+  Real barometerObservationAge_s;
   discrete Boolean initialized(start = false, fixed = true);
   discrete Boolean predictionAccepted(start = false, fixed = true);
   discrete Boolean mocapCorrectionAccepted(start = false, fixed = true);
@@ -128,6 +213,7 @@ protected
   discrete Boolean barometerBiasInitialized(start = false, fixed = true);
   discrete Boolean barometerBiasUpdateAccepted(start = false, fixed = true);
   discrete Integer barometerBiasCalibrationCount(start = 0, fixed = true);
+  discrete Boolean barometerBiasCalibrationClosed(start = false, fixed = true);
   discrete Real stateBarometerBias_m(start = 0.0, fixed = true);
   discrete Real stateBarometerBiasVariance_m2(start = 4.0, fixed = true);
   discrete Boolean terrainInitialized(start = false, fixed = true);
@@ -153,16 +239,18 @@ protected
     "Monotonic count of SHIFTED FUSION INSTANTS on the status boundary: ticks
      on which at least one aiding correction was accepted, at most one per
      tick. See Avionics.EstimatorStatus.acceptedCorrectionCount, which states
-     the contract; this filter satisfies it by construction because its
-     correction dispatch is a priority chain that fuses at most one source per
-     tick, so correctionOutcome carries a single value per tick and this
-     increments on it.
+     the contract. Coalesce all real-sensor acceptance flags into one increment
+     even when several independent sources correct the state on the same tick.
 
      The outcome field is a level held for the whole filter tick, so a
      consumer running faster than the filter cannot edge-detect it; the count
      gives that consumer a well-defined edge.";
   discrete Real normalizedInnovationSquared(start = 0.0, fixed = true);
   discrete Boolean estimateValid(start = false, fixed = true);
+  discrete Boolean reseeded(start = false, fixed = true);
+  discrete Integer reseedCount(start = 0, fixed = true)
+    "Monotonic count of automatic recovery-ladder re-seeds since the last
+     reset; incremented on each tick reseeded is true";
   discrete Integer anchorSource(start = 0, fixed = true);
   discrete Real mocapStale_s(start = 1.0e30, fixed = true);
   discrete Real gpsStale_s(start = 1.0e30, fixed = true);
@@ -179,13 +267,21 @@ protected
   discrete Real barometerBiasTimestampConsumed_s(
     start = -1.0e30, fixed = true);
   discrete Real terrainTimestampConsumed_s(start = -1.0e30, fixed = true);
+  discrete Real quietElapsed_s(start = 0.0, fixed = true);
+  discrete Real alignmentWait_s(start = 0.0, fixed = true);
+  discrete Real pseudoPositionHold_m[3](each start = 0.0, each fixed = true);
+  discrete Integer alignmentSource(start = 0, fixed = true);
+  discrete Real alignmentSpecificForce_m_s2[3](each start = 0.0, each fixed = true);
+  discrete Real quietAngularRate_rad_s[3](each start = 0.0, each fixed = true);
+  discrete Boolean pseudoPositionCorrectionAccepted(start = false, fixed = true);
+  discrete Boolean zeroVelocityCorrectionAccepted(start = false, fixed = true);
 
 algorithm
   when sample(0.0, samplePeriod) then
     barometerBiasTimestampConsumed_s := if not reset
         and barometer.valid
         and abs(barometer.timestamp_s)
-          < Estimation.StrapdownINS.ESKF.FiniteMagnitudeLimit
+          < FiniteMagnitudeLimit
         and barometer.timestamp_s
           > pre(barometerBiasTimestampConsumed_s) + 1.0e-9
       then barometer.timestamp_s
@@ -194,7 +290,7 @@ algorithm
     terrainTimestampConsumed_s := if not reset
         and opticalFlow.valid
         and abs(opticalFlow.timestamp_s)
-          < Estimation.StrapdownINS.ESKF.FiniteMagnitudeLimit
+          < FiniteMagnitudeLimit
         and opticalFlow.timestamp_s
           > pre(terrainTimestampConsumed_s) + 1.0e-9
       then opticalFlow.timestamp_s
@@ -203,27 +299,51 @@ algorithm
     auxiliaryRotationWorldBody := LieGroups.SO3.Quat.to_DCM(
       pre(stateQuaternion));
     auxiliaryPredictedVariance_m2 := max(
-      if not reset and pre(barometerBiasCalibrationCount) > 0 then
+      if not reset and (pre(barometerBiasCalibrationCount) > 0
+          or (useJointBarometerBias and pre(initialized))
+          or (useDeclaredRestBarometerCalibration
+            and pre(barometerBiasInitialized))) then
         pre(stateBarometerBiasVariance_m2)
       else initialBarometerBiasVariance_m2, 1.0e-12)
       + max(barometerBiasProcessNoise_m2_s, 0.0) * samplePeriod;
     auxiliaryObservationVariance_m2 := barometer.variance_m2;
-    auxiliaryInnovationVariance_m2 := auxiliaryPredictedVariance_m2
+    barometerObservationAge_s := imu.timestamp_s - barometer.timestamp_s;
+    barometerObservationBiasVariance_m2 := auxiliaryPredictedVariance_m2;
+    if useBarometerBiasConsider or useJointBarometerBias then
+      barometerObservationBiasVariance_m2 := auxiliaryPredictedVariance_m2
+        - max(barometerBiasProcessNoise_m2_s, 0.0)
+          * max(barometerObservationAge_s, 0.0);
+    end if;
+    auxiliaryInnovationVariance_m2 := barometerObservationBiasVariance_m2
       + auxiliaryObservationVariance_m2;
     auxiliaryObservation_m := barometer.altitudeWorldEnu_m
       - initialPositionWorldEnu_m[3];
+    barometerBiasCalibrationClosed := not reset
+      and (pre(barometerBiasCalibrationClosed)
+        or (useDeclaredRestBarometerCalibration and not vehicleAtRest));
     // Average a finite stationary startup window against the declared local
     // origin. During this window the sample is withheld from the navigation
     // correction, avoiding the positive feedback caused by using the same
     // pressure observation to update both altitude and its datum.
-    if not reset and not pre(barometerBiasInitialized) and barometer.valid
+    if not reset and barometer.valid
+        and ((useDeclaredRestBarometerCalibration
+            and vehicleAtRest and not barometerBiasCalibrationClosed)
+          or (not useDeclaredRestBarometerCalibration
+            and not pre(barometerBiasInitialized)))
         and abs(barometer.timestamp_s)
-          < Estimation.StrapdownINS.ESKF.FiniteMagnitudeLimit
+          < FiniteMagnitudeLimit
         and barometer.timestamp_s
           > pre(barometerBiasTimestampConsumed_s) + 1.0e-9
+        and abs(barometer.altitudeWorldEnu_m) < FiniteMagnitudeLimit
         and barometer.variance_m2 > 0.0
+        and barometer.variance_m2 < FiniteMagnitudeLimit
+        and (not (useBarometerBiasConsider or useJointBarometerBias)
+          or (barometerObservationAge_s >= -1.0e-6
+            and barometerObservationAge_s <= maximumAidingDelay_s
+            and barometerObservationBiasVariance_m2 >= 0.0
+            and barometerObservationBiasVariance_m2 < FiniteMagnitudeLimit))
         and auxiliaryInnovationVariance_m2 > 1.0e-12 then
-      auxiliaryGain := auxiliaryPredictedVariance_m2
+      auxiliaryGain := barometerObservationBiasVariance_m2
         / auxiliaryInnovationVariance_m2;
       stateBarometerBias_m := (if not reset
           and pre(barometerBiasCalibrationCount) > 0
@@ -235,6 +355,12 @@ algorithm
             else initialBarometerBias_m));
       stateBarometerBiasVariance_m2 := max((1.0 - auxiliaryGain)
         * auxiliaryPredictedVariance_m2, 1.0e-12);
+      if useBarometerBiasConsider or useJointBarometerBias then
+        stateBarometerBiasVariance_m2 := max((1.0 - auxiliaryGain)
+          * barometerObservationBiasVariance_m2
+          + max(barometerBiasProcessNoise_m2_s, 0.0)
+            * max(barometerObservationAge_s, 0.0), 1.0e-12);
+      end if;
       barometerBiasCalibrationCount :=
         pre(barometerBiasCalibrationCount) + 1;
       barometerBiasInitialized := pre(barometerBiasCalibrationCount) + 1
@@ -242,10 +368,14 @@ algorithm
       barometerBiasUpdateAccepted := true;
     else
       stateBarometerBias_m := if not reset
-          and pre(barometerBiasCalibrationCount) > 0
+          and (pre(barometerBiasCalibrationCount) > 0
+            or (useJointBarometerBias and pre(initialized)))
         then pre(stateBarometerBias_m) else initialBarometerBias_m;
       stateBarometerBiasVariance_m2 := auxiliaryPredictedVariance_m2;
-      barometerBiasInitialized := not reset and pre(barometerBiasInitialized);
+      barometerBiasInitialized := not reset
+        and (pre(barometerBiasInitialized)
+          or (useDeclaredRestBarometerCalibration
+            and barometerBiasCalibrationClosed));
       barometerBiasCalibrationCount := if reset then 0
         else pre(barometerBiasCalibrationCount);
       barometerBiasUpdateAccepted := false;
@@ -268,7 +398,7 @@ algorithm
       + auxiliaryObservationVariance_m2;
     if not reset and opticalFlow.valid
         and abs(opticalFlow.timestamp_s)
-          < Estimation.StrapdownINS.ESKF.FiniteMagnitudeLimit
+          < FiniteMagnitudeLimit
         and opticalFlow.timestamp_s
           > pre(terrainTimestampConsumed_s) + 1.0e-9
         and opticalFlow.quality >= minimumOpticalFlowQuality
@@ -316,6 +446,7 @@ algorithm
      correctionSource,
      normalizedInnovationSquared,
      estimateValid,
+     reseeded,
      mocapRejections,
      gpsRejections,
      opticalFlowRejections,
@@ -331,16 +462,35 @@ algorithm
      gpsTimestampConsumed_s,
      magnetometerTimestampConsumed_s,
      barometerTimestampConsumed_s,
-     opticalFlowTimestampConsumed_s) :=
-      Estimation.StrapdownINS.ESKF.step(
+     opticalFlowTimestampConsumed_s,
+     alignmentWait_s,
+     quietElapsed_s,
+     pseudoPositionHold_m,
+     alignmentSource,
+     alignmentSpecificForce_m_s2,
+     quietAngularRate_rad_s,
+     pseudoPositionCorrectionAccepted,
+     zeroVelocityCorrectionAccepted,
+     stationaryImuCorrectionAccepted,
+     stateCovarianceRoot,
+     barometerBiasCrossCovariance,
+     stateBarometerBias_m,
+     stateBarometerBiasVariance_m2) :=
+      step(
         pre(initialized),
-        Estimation.StrapdownINS.ESKF.State(
+        State(
           positionWorldEnu_m=pre(statePosition),
           velocityWorldEnu_m_s=pre(stateVelocity),
           quaternionWorldBody=pre(stateQuaternion),
           gyroscopeBiasBodyFlu_rad_s=pre(stateGyroscopeBias),
           accelerometerBiasBodyFlu_m_s2=pre(stateAccelerometerBias),
-          covariance=pre(stateCovariance)),
+          covariance=pre(stateCovariance),
+          covarianceRoot=pre(stateCovarianceRoot),
+          barometerBiasCrossCovariance=pre(barometerBiasCrossCovariance),
+          barometerBias_m=stateBarometerBias_m,
+          barometerBiasVariance_m2=stateBarometerBiasVariance_m2,
+          useJointBarometerBias=useJointBarometerBias,
+          useSquareRootCovariance=useSquareRootCovariance),
         reset,
         imu,
         mocap,
@@ -348,6 +498,7 @@ algorithm
         magnetometer,
         Avionics.BarometerSample(
           valid=barometer.valid and pre(barometerBiasInitialized)
+            and not barometerBiasUpdateAccepted
             and barometer.timestamp_s
               > pre(barometerBiasTimestampConsumed_s) + 1.0e-9,
           fresh=barometer.fresh,
@@ -357,8 +508,8 @@ algorithm
         opticalFlow,
         gravityWorldEnu_m_s2,
         samplePeriod,
-        Estimation.StrapdownINS.ESKF.Tuning(
-          initialState=Estimation.StrapdownINS.ESKF.NominalState(
+        Tuning(
+          initialState=NominalState(
             positionWorldEnu_m=initialPositionWorldEnu_m,
             velocityWorldEnu_m_s=initialVelocityWorldEnu_m_s,
             quaternionWorldBody=initialQuaternionWorldBody,
@@ -370,8 +521,16 @@ algorithm
           varianceLimits=varianceLimits,
           innovationGate=innovationGate,
           localMagneticFieldWorldEnu_T=localMagneticFieldWorldEnu_T,
+          useEquivariantMagnetometer=useEquivariantMagnetometer,
+          useGeometricAlignment=useGeometricAlignment,
+          useSemiDirectBias=useSemiDirectBias,
+          useStationaryImu=useStationaryImu,
+          useSquareRootCovariance=useSquareRootCovariance,
           barometerBias_m=stateBarometerBias_m,
           barometerBiasVariance_m2=stateBarometerBiasVariance_m2,
+          useBarometerBiasConsider=useBarometerBiasConsider,
+          useJointBarometerBias=useJointBarometerBias,
+          barometerBiasProcessNoise_m2_s=barometerBiasProcessNoise_m2_s,
           maximumAidingDelay_s=maximumAidingDelay_s,
           minimumOpticalFlowQuality=minimumOpticalFlowQuality,
           minimumOpticalFlowGroundDistance_m=
@@ -379,7 +538,16 @@ algorithm
           covarianceInflateWindow_s=covarianceInflateWindow_s,
           covarianceInflateTimeConstant_s=covarianceInflateTimeConstant_s,
           aidingDivergentWindow_s=aidingDivergentWindow_s,
-          aidingStaleTimeout_s=aidingStaleTimeout_s),
+          aidingStaleTimeout_s=aidingStaleTimeout_s,
+          aidingReseedWindow_s=aidingReseedWindow_s,
+          initialAlignmentWindow_s=initialAlignmentWindow_s,
+          initialAlignmentTimeout_s=initialAlignmentTimeout_s,
+          quietSpecificForceTolerance_m_s2=quietSpecificForceTolerance_m_s2,
+          quietAngularRateLimit_rad_s=quietAngularRateLimit_rad_s,
+          quietFilterTimeConstant_s=quietFilterTimeConstant_s,
+          pseudoPositionVariance_m2=pseudoPositionVariance_m2,
+          zeroVelocityVariance_m2_s2=zeroVelocityVariance_m2_s2,
+          stationaryVelocityVariance_m2_s2=stationaryVelocityVariance_m2_s2),
         pre(consecutiveRejectedCorrections),
         pre(rejectionElapsed_s),
         pre(mocapRejections),
@@ -396,7 +564,14 @@ algorithm
         pre(gpsTimestampConsumed_s),
         pre(magnetometerTimestampConsumed_s),
         pre(barometerTimestampConsumed_s),
-        pre(opticalFlowTimestampConsumed_s));
+        pre(opticalFlowTimestampConsumed_s),
+        pre(quietElapsed_s),
+        pre(alignmentWait_s),
+        pre(pseudoPositionHold_m),
+        pre(alignmentSource),
+        pre(alignmentSpecificForce_m_s2),
+        pre(quietAngularRate_rad_s),
+        vehicleAtRest);
     (estimate.valid,
      estimate.timestamp_s,
      estimate.positionWorldEnu_m,
@@ -407,14 +582,20 @@ algorithm
      estimate.eulerRpy_rad,
      estimate.angularVelocityBodyFlu_rad_s,
      estimate.angularVelocityWorldEnu_rad_s) :=
-      Estimation.StrapdownINS.ESKF.navigationEstimate(
-        Estimation.StrapdownINS.ESKF.State(
+      navigationEstimate(
+        State(
           positionWorldEnu_m=statePosition,
           velocityWorldEnu_m_s=stateVelocity,
           quaternionWorldBody=stateQuaternion,
           gyroscopeBiasBodyFlu_rad_s=stateGyroscopeBias,
           accelerometerBiasBodyFlu_m_s2=stateAccelerometerBias,
-          covariance=stateCovariance),
+          covariance=stateCovariance,
+          covarianceRoot=stateCovarianceRoot,
+          barometerBiasCrossCovariance=barometerBiasCrossCovariance,
+          barometerBias_m=stateBarometerBias_m,
+          barometerBiasVariance_m2=stateBarometerBiasVariance_m2,
+          useJointBarometerBias=useJointBarometerBias,
+          useSquareRootCovariance=useSquareRootCovariance),
         // The HELD sample, never the raw connector: three published fields
         // are computed from the IMU rather than from the state, so passing
         // the raw sample here is what let a non-finite reading reach the
@@ -447,9 +628,16 @@ algorithm
         gravityWorldEnu_m_s2,
         estimateValid);
     acceptedCorrectionCount := if reset then 0
-      elseif correctionOutcome == Estimation.StrapdownINS.CorrectionAccepted
+      elseif mocapCorrectionAccepted or gpsPositionCorrectionAccepted
+          or gpsVelocityCorrectionAccepted or opticalFlowCorrectionAccepted
+          or barometerCorrectionAccepted or magnetometerCorrectionAccepted
+          or (vehicleAtRest and zeroVelocityCorrectionAccepted)
+          or stationaryImuCorrectionAccepted
         then pre(acceptedCorrectionCount) + 1
       else pre(acceptedCorrectionCount);
+    reseedCount := if reset then 0
+      elseif reseeded then pre(reseedCount) + 1
+      else pre(reseedCount);
     status.initialized := initialized;
     status.predictionAccepted := predictionAccepted;
     status.mocapCorrectionAccepted := mocapCorrectionAccepted;
@@ -471,7 +659,15 @@ algorithm
     status.recoveryStage := recoveryStage;
     status.anchorSource := anchorSource;
     status.imuPayloadHeld := imuPayloadHeld;
+    status.reseeded := reseeded;
+    status.reseedCount := reseedCount;
+    status.alignmentSource := alignmentSource;
+    status.alignmentSpecificForceBodyFlu_m_s2 := alignmentSpecificForce_m_s2;
+    status.quietElapsed_s := quietElapsed_s;
+    status.pseudoPositionCorrectionAccepted := pseudoPositionCorrectionAccepted;
+    status.zeroVelocityCorrectionAccepted := zeroVelocityCorrectionAccepted;
     errorCovariance := stateCovariance;
+    errorCovarianceRoot := stateCovarianceRoot;
     estimatedGyroscopeBias_rad_s := stateGyroscopeBias;
     estimatedAccelerometerBias_m_s2 := stateAccelerometerBias;
   end when;
@@ -494,17 +690,33 @@ equation
   // it is false -- the same predicate-exhaustion defect this whole change
   // exists to remove, and it must not reappear in the tuning surface.
   assert(covarianceInflateWindow_s > 0.0
-    and covarianceInflateWindow_s < Estimation.StrapdownINS.ESKF.FiniteMagnitudeLimit,
+    and covarianceInflateWindow_s < FiniteMagnitudeLimit,
     "covarianceInflateWindow_s must be finite and strictly positive");
   assert(covarianceInflateTimeConstant_s > 0.0
-    and covarianceInflateTimeConstant_s < Estimation.StrapdownINS.ESKF.FiniteMagnitudeLimit,
+    and covarianceInflateTimeConstant_s < FiniteMagnitudeLimit,
     "covarianceInflateTimeConstant_s must be finite and strictly positive");
   assert(aidingStaleTimeout_s > 0.0
-    and aidingStaleTimeout_s < Estimation.StrapdownINS.ESKF.FiniteMagnitudeLimit,
+    and aidingStaleTimeout_s < FiniteMagnitudeLimit,
     "aidingStaleTimeout_s must be finite and strictly positive");
   assert(aidingDivergentWindow_s > covarianceInflateWindow_s
-    and aidingDivergentWindow_s < Estimation.StrapdownINS.ESKF.FiniteMagnitudeLimit,
+    and aidingDivergentWindow_s < FiniteMagnitudeLimit,
     "aidingDivergentWindow_s must be finite and exceed covarianceInflateWindow_s");
+  // The re-seed is opt-in, so a non-positive window is a legitimate
+  // configuration and is not asserted against. A finite POSITIVE window that
+  // fails to exceed the divergent window is a configuration error, not a
+  // disable, so it is caught loudly here rather than silently ignored.
+  assert(not (aidingReseedWindow_s > 0.0
+      and aidingReseedWindow_s < FiniteMagnitudeLimit
+      and aidingReseedWindow_s <= aidingDivergentWindow_s),
+    "aidingReseedWindow_s, when enabled, must exceed aidingDivergentWindow_s");
+  assert(quietSpecificForceTolerance_m_s2 > 0.0
+    and quietSpecificForceTolerance_m_s2 < FiniteMagnitudeLimit,
+    "quietSpecificForceTolerance_m_s2 must be finite and strictly positive");
+  assert(quietAngularRateLimit_rad_s > 0.0
+    and quietAngularRateLimit_rad_s < FiniteMagnitudeLimit,
+    "quietAngularRateLimit_rad_s must be finite and strictly positive");
+  assert(quietFilterTimeConstant_s < FiniteMagnitudeLimit,
+    "quietFilterTimeConstant_s must be finite");
 
   annotation(Documentation(info = "<html>
     <p>This block is a concrete implementation of the stable estimator
@@ -525,15 +737,52 @@ equation
     happened to fire, which is what allowed a NaN measurement -- against which
     every comparison is false -- to be applied and to poison the state
     permanently.</p>
-    <p><b>The estimator never re-seeds its own state from aiding it is
-    rejecting.</b> Sustained rejection drives a two-stage ladder timed in
-    wall-clock seconds: first the covariance is inflated to the declared
-    mission envelope with the state untouched, which is the only recovery
-    action that cannot itself be wrong and which is sufficient whenever
-    recovery is possible at all; then, if the aiding still does not fit,
-    <code>estimate.valid</code> goes false and the vehicle's failsafe takes
-    over. Re-seeding position, attitude, and velocity remains available
-    through the commanded <code>reset</code> input, where it is a deliberate
-    act rather than a filter's guess.</p>
-  </html>"));
+    <p><b>Recovery is a ladder timed in wall-clock seconds on the anchor
+    source.</b> First the position and velocity covariance is inflated
+    toward the declared mission envelope with the state untouched, which is
+    the only recovery action that cannot itself be wrong and which readmits
+    a good fix that had been locked out by an over-tight covariance. If the
+    anchor still does not fit by <code>aidingDivergentWindow_s</code> the
+    divergence is reported on <code>status.recoveryStage</code>;
+    <code>estimate.valid</code> deliberately stays a statement only about
+    whether the published numbers are finite, because clearing it on the
+    deployed stack latches a motors-zero fault in every mode. An optional
+    third stage, enabled by setting <code>aidingReseedWindow_s</code>
+    positive and above the divergent window, re-seeds position (and velocity
+    from a GPS sample that reports it) from the next fresh finite anchor
+    sample and restores the position and velocity covariance to the initial
+    variances, keeping attitude and the bias states; it is reported as
+    <code>correctionOutcome == CorrectionReseeded</code>,
+    <code>status.reseeded</code>, and <code>status.reseedCount</code>, never
+    as a gate acceptance, and is refused on a non-finite payload. It is
+    disabled by default. The commanded <code>reset</code> input remains the
+    operator-level re-seed of position, attitude, and velocity together.</p>
+  <h4>Configure a vehicle</h4>
+<p>Set the initial pose and biases, initial variances, continuous process-noise
+covariances, gravity and local magnetic field through
+<a href=\"modelica://Estimation.StrapdownINS.PartialEstimator\">PartialEstimator</a>.
+The default magnetic reference is site-specific. The block's
+<code>samplePeriod</code> sets its discrete update interval; feed calibrated
+ENU/FLU packets on the inherited sensor connectors.</p>
+<h4>Choose the IMU path</h4>
+<p>Use <a href=\"modelica://Estimation.StrapdownINS.preintegrateImuStep\">preintegrateImuStep</a>
+to accumulate intervals and bias sensitivities into an
+<a href=\"modelica://Avionics.ImuSample\">ImuSample</a>. A preintegral carries its
+integration duration and bias anchor; its rotation, velocity, position and five
+Jacobian blocks describe the same interval. The filter transports it to the
+estimated bias with
+<a href=\"modelica://Estimation.StrapdownINS.correctPreintegratedImu\">correctPreintegratedImu</a>.
+This first-order bias correction is not reintegration of the raw samples.</p>
+<h4>Inspect health and uncertainty</h4>
+<p>Read per-source acceptance flags, innovation statistics and recovery status
+from <code>status</code>. A finite <code>estimate</code> does not establish that
+position is trustworthy: use the recovery and aiding-health signals as well.
+The full error covariance uses body-local right perturbations, ordered
+{position, velocity, attitude, gyroscope bias, accelerometer bias}. Transform
+truth errors into those coordinates before computing NEES.</p>
+<p>To compare delayed fusion with the direct block, place this same backend in
+<a href=\"modelica://Estimation.FusionHorizon.HorizonEstimator\">HorizonEstimator</a>.
+Its horizon state and current-time predicted output have different timestamps;
+only pair a covariance with the state epoch it describes.</p>
+    </html>"));
 end Estimator;

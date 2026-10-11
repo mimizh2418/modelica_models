@@ -37,6 +37,14 @@ jobs:
           key: rumoca-runtime-${{ runner.os }}-${{ runner.arch }}-${{ steps.rumoca-runtime.outputs.key }}
       - name: Import or build pinned Rumoca runtime
         run: python -m tools.modelica_models_cli.nix_cache ensure .ci-cache/rumoca-runtime
+      - name: Provide swap for Rumoca solver construction
+        run: |
+          swap_path="$RUNNER_TEMP/modelica-models.swap"
+          sudo fallocate -l 8G "$swap_path"
+          sudo chmod 600 "$swap_path"
+          sudo mkswap "$swap_path"
+          sudo swapon "$swap_path"
+          free -h
       - name: Run tests
         run: nix run . -- test
       - name: Upload planning trajectories
@@ -57,10 +65,12 @@ jobs:
         include:
           - vehicle: cubs2
             label: CUBS2
+            simulation_workers: 1
             figure: cubs2-qualification-summary.png
             report: qualification-report.html
           - vehicle: rdd2
             label: RDD2
+            simulation_workers: 1
             figure: rdd2-waypoint-summary.png
             report: waypoint-report.html
 
@@ -80,6 +90,8 @@ jobs:
         run: python -m tools.modelica_models_cli.nix_cache ensure .ci-cache/rumoca-runtime
       - id: qualify
         name: Run ${{ matrix.label }} qualification
+        env:
+          RDD2_SIM_WORKERS: ${{ matrix.simulation_workers }}
         run: nix run . -- qualify ${{ matrix.vehicle }}
       - id: verify-report
         name: Verify ${{ matrix.label }} qualification plots and report

@@ -7,6 +7,7 @@ model SO3 "SO(3) algebra, representations, Jacobians, and conversions"
   Real quaternion[4];
   Real quaternionIdentity[4];
   Real quaternionRoundTrip[4];
+  Real logRecovered[3];
   Real mrp[3];
   Real mrpIdentity[3];
   Real mrpRoundTrip[3];
@@ -23,6 +24,10 @@ model SO3 "SO(3) algebra, representations, Jacobians, and conversions"
   Real eulerJr[3, 3];
   Real eulerJl[3, 3];
   Real negativeQuaternionR[3, 3];
+  Real dcmFromQuat[3, 3];
+  Real quatFromDcm[4];
+  Real eulerFromQuat[3];
+  Real quatFromEuler[4];
   LieGroups.SO3.EulerSequences.B232.Orientation B232Element;
   LieGroups.SO3.EulerSequences.S123.Orientation S123Element;
   Real B232R[3, 3];
@@ -34,6 +39,7 @@ equation
     quaternion, LieGroups.SO3.Quat.inverse(quaternion));
   quaternionRoundTrip = LieGroups.SO3.Quat.exp_map(
     LieGroups.SO3.Quat.log_map(quaternion));
+  logRecovered = LieGroups.SO3.Quat.log_map(quaternion);
   mrp = LieGroups.SO3.Mrp.exp_map(tangent);
   mrpIdentity = LieGroups.SO3.Mrp.product(mrp, LieGroups.SO3.Mrp.inverse(mrp));
   mrpRoundTrip = LieGroups.SO3.Mrp.exp_map(LieGroups.SO3.Mrp.log_map(mrp));
@@ -52,6 +58,10 @@ equation
   eulerJr = LieGroups.SO3.EulerB321.right_jacobian(euler);
   eulerJl = LieGroups.SO3.EulerB321.left_jacobian(euler);
   negativeQuaternionR = LieGroups.SO3.Quat.to_DCM(-quaternion);
+  dcmFromQuat = LieGroups.SO3.Quat.to_DCM(quaternion);
+  quatFromDcm = LieGroups.SO3.Quat.from_DCM(dcmFromQuat);
+  eulerFromQuat = LieGroups.SO3.EulerB321.from_Quat(quaternion);
+  quatFromEuler = LieGroups.SO3.EulerB321.to_Quat(eulerFromQuat);
   B232Element = LieGroups.SO3.EulerSequences.B232.from_Matrix(R);
   S123Element = LieGroups.SO3.EulerSequences.S123.from_Matrix(R);
   B232R = LieGroups.SO3.EulerSequences.B232.to_Matrix(B232Element);
@@ -67,6 +77,8 @@ equation
     "SO3 quaternion inverse failed");
   assert(abs(abs(quaternionRoundTrip * quaternion) - 1.0) < tolerance,
     "SO3 quaternion exp/log failed");
+  assert(Tests.Assertions.maxAbsVector(logRecovered - tangent) < tolerance,
+    "SO3 quaternion log_map must recover all three rotation-vector components");
   assert(Tests.Assertions.maxAbsVector(mrpIdentity) < tolerance and
          Tests.Assertions.maxAbsVector(mrpRoundTrip - mrp) < tolerance,
     "SO3 MRP identity or exp/log failed");
@@ -93,6 +105,10 @@ equation
     "Euler Jacobian-at-zero test failed");
   assert(Tests.Assertions.maxAbsMatrix(negativeQuaternionR - R) < tolerance,
     "Negative-quaternion DCM test failed");
+  assert(abs(abs(quatFromDcm * quaternion) - 1.0) < tolerance,
+    "SO3 quaternion from_DCM must recover all four quaternion components");
+  assert(abs(abs(quatFromEuler * quaternion) - 1.0) < tolerance,
+    "SO3 EulerB321 from_Quat must recover all three Euler components");
   assert(Tests.Assertions.maxAbsMatrix(B232R - R) < tolerance and
          Tests.Assertions.maxAbsMatrix(S123R - R) < tolerance,
     "Named B232 or S123 Euler representation failed");

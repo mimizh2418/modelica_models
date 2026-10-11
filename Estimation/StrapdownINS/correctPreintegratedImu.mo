@@ -10,8 +10,9 @@ function correctPreintegratedImu
   // 33(1):1-21, 2017, doi:10.1109/TRO.2016.2597321, Section VII-B;
   // predecessor Lupton and Sukkarieh, IEEE T-RO 28(1):61-76, 2012.  The
   // Jacobians themselves come from Estimation.StrapdownINS.preintegrateImuStep
-  // and are the closed-form recursions of Lin, Pant, Perseghetti and Goppert
-  // (IEEE L-CSS 2025) extended to the first-order hold.  References:
+  // and differentiate the retained held or FOH exponent through the mixed
+  // exponential and composition. They are exact derivatives of that nominal
+  // approximation, not of the continuous physical trajectory. References:
   // Estimation.StrapdownINS.
   input Avionics.ImuSample imu;
   input Real gyroscopeBiasBodyFlu_rad_s[3];
@@ -45,4 +46,17 @@ algorithm
       * gyroscopeBiasDelta_rad_s
     + imu.deltaPositionAccelerometerBiasJacobian_s2
       * accelerometerBiasDelta_m_s2;
+  annotation(Documentation(info = "<html>
+    <h4>Bias-anchor transport</h4>
+<p>The stored preintegral is evaluated at its two bias anchors. This function
+multiplies each bias change by the corresponding stored Jacobian, right-injects
+the rotation correction, and adds the velocity and position corrections. It
+leaves the input packet unchanged.</p>
+<p>Supply deltas, anchors and Jacobians from the same accumulation window, such
+as the outputs of
+<a href=\"modelica://Estimation.StrapdownINS.preintegrateImuStep\">preintegrateImuStep</a>.
+The transport is first order in bias change. It is exact neither for arbitrary
+bias changes nor for the underlying continuous IMU trajectory; large changes
+require reassessing the anchor or reintegrating available raw samples.</p>
+    </html>"));
 end correctPreintegratedImu;

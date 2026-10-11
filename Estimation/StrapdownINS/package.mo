@@ -15,18 +15,64 @@ package StrapdownINS
   constant Integer CorrectionRejectedFactorization = 4;
   constant Integer CorrectionRejectedCovarianceUnusable = 5;
   constant Integer CorrectionRejectedTimestamp = 6;
+  // Reported on the tick the automatic recovery ladder re-seeds the state
+  // from a fresh anchor sample after a sustained rejection window. It is a
+  // deliberate replacement of the state, not an ordinary gated fusion, so it
+  // is named rather than reported as CorrectionAccepted.
+  constant Integer CorrectionReseeded = 7;
   constant Integer SourceNone = 0;
   constant Integer SourceMocap = 1;
   constant Integer SourceGps = 2;
   constant Integer SourceOpticalFlow = 3;
   constant Integer SourceMagnetometer = 4;
   constant Integer SourceBarometer = 5;
+  constant Integer SourcePseudoPosition = 6
+    "Synthetic hold-position measurement fused while no anchor source is
+     live, so an unaided filter cannot integrate a tilt error into an
+     unbounded velocity. Never an anchor and never counted as an accepted
+     aiding correction";
+  constant Integer SourceZeroVelocity = 7
+    "Synthetic zero-velocity measurement fused while the IMU is quasi-static
+     and no anchor source is live. Same standing as SourcePseudoPosition";
+  constant Integer AlignmentNone = 0
+    "No initial attitude alignment has been performed yet";
+  constant Integer AlignmentMocap = 1
+    "Initial attitude taken from a motion-capture quaternion";
+  constant Integer AlignmentAccelerometerMagnetometer = 2
+    "Initial attitude leveled from the specific force with heading from the
+     magnetometer";
+  constant Integer AlignmentAccelerometer = 3
+    "Initial attitude leveled from the specific force with heading left at
+     zero, because no magnetometer sample was usable";
+  constant Integer AlignmentFallback = 4
+    "Initial attitude taken from the configured initial quaternion because no
+     usable sample was available";
   constant Integer RecoveryNominal = 0;
   constant Integer RecoveryCovarianceInflated = 1;
   constant Integer RecoveryAidingDivergent = 2;
   constant Integer RecoveryMisconfigured = 3;
 
   annotation(Documentation(info = "<html>
+    <h4>Choose a filter</h4>
+    <p><a href=\"modelica://Estimation.StrapdownINS.ESKF.Estimator\">ESKF.Estimator</a>
+    implements the 15-state right-error filter;
+    <a href=\"modelica://Estimation.StrapdownINS.UKF.Estimator\">UKF.Estimator</a>
+    implements a manifold UKF. Both use
+    <a href=\"modelica://Estimation.StrapdownINS.PartialEstimator\">PartialEstimator</a>
+    and publish <a href=\"modelica://Avionics.NavigationEstimate\">NavigationEstimate</a>.</p>
+    <h4>Deliver sensor samples</h4>
+    <p>Use world ENU and body FLU coordinates. Set sensor timestamps to capture
+    time in the estimator clock; hold <code>valid</code> while a sample is usable
+    and pulse <code>fresh</code> for one estimator tick per new arrival. Supply
+    covariance matching the actual sensor noise. A held sample must not be
+    fused repeatedly as independent data.</p>
+    <h4>Delayed aiding</h4>
+    <p>The direct ESKF retrodicts with a held IMU input; see
+    <a href=\"modelica://Estimation.StrapdownINS.ESKF.correctGps\">correctGps</a>.
+    <a href=\"modelica://Estimation.FusionHorizon.HorizonEstimator\">HorizonEstimator</a>
+    instead buffers measurements, filters in the past and predicts a separate
+    current-time output. Pair covariance diagnostics with state and truth at
+    the same epoch and in the same tangent convention.</p>
     <p>This namespace groups alternative estimators for the same navigation
     problem: attitude, velocity, position, gyroscope bias, and accelerometer
     bias from an IMU plus external aiding. Algorithm names are nested below
@@ -45,16 +91,17 @@ package StrapdownINS
     https://docs.lib.purdue.edu/aaepubs/61</a>). The zero-order-hold closed
     form that <code>LieGroups.SE23.Quat.exp_mixed</code> evaluates and that
     <code>preintegrateImuStep</code> composes.</li>
-    <li>L.-Y. Lin, K. A. Pant, B. Perseghetti, and J. Goppert, \"An Exact Error
-    Theory for Mixed-Invariant Preintegration on SE_2(3): Proved Truncation
-    Residuals, a Sufficiency Bound for Deployed Coning Algorithms, and a
-    Delayed-Fusion Error-State Filter,\" manuscript in preparation, 2026. The
+    <li>H. Reynolds, M. K. Condie, B. Perseghetti, and J. Goppert,
+    \"First-Order-Hold Magnus Preintegration on SE_n(3) with Computable
+    Flow-Error Bounds,\" ACC 2027 manuscript, 2026. The
     first-order-hold results this package implements: the FOH preintegration
     theorem (the third-order truncated Magnus exponent and its O(T^5) residual,
     with no T^4 term), the bracket-decomposition proposition (the single Lie
     bracket splits into the classical coning, sculling, and scrolling
-    corrections), and the FOH bias-sensitivity proposition (one dt^2/12 cross
-    term appended per Jacobian channel).</li>
+    corrections), and the exponent bias sensitivities. Physical-increment
+    Jacobians apply the chain rule through the closed-form mixed exponential
+    and through composition. The current implementation does not evaluate the
+    manuscript's flow-error certificate.</li>
     <li>W. Magnus, \"On the exponential solution of differential equations for
     a linear operator,\" <i>Communications on Pure and Applied Mathematics</i>,
     vol. 7, no. 4, pp. 649-673, 1954. The expansion the first-order-hold

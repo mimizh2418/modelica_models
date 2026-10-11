@@ -21,6 +21,8 @@ algorithm
     LieGroups.SE23.Quat.exp_map(perturbation[1:9]));
   perturbedVector := Estimation.StrapdownINS.ESKF.retrodict(
     Estimation.StrapdownINS.ESKF.State(
+      barometerBiasCrossCovariance=zeros(15),
+      barometerBias_m=0.0, barometerBiasVariance_m2=0.0, useJointBarometerBias=false,
       positionWorldEnu_m = perturbedPose[1:3],
       velocityWorldEnu_m_s = perturbedPose[4:6],
       quaternionWorldBody = perturbedPose[7:10],
@@ -28,7 +30,8 @@ algorithm
         + perturbation[10:12],
       accelerometerBiasBodyFlu_m_s2 = current.accelerometerBiasBodyFlu_m_s2
         + perturbation[13:15],
-      covariance = zeros(15, 15)),
+      covariance = zeros(15, 15),
+        useSquareRootCovariance=false, covarianceRoot=zeros(15, 15)),
     angularVelocityMeasuredBodyFlu_rad_s,
     specificForceMeasuredBodyFlu_m_s2, gravityWorldEnu_m_s2, age_s);
   tangentError := cat(1,

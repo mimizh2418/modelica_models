@@ -16,7 +16,7 @@ protected
     each start=0.0, each fixed=true);
   discrete Real stateAccelerometerBiasBodyFlu_m_s2[3](
     each start=0.0, each fixed=true);
-  discrete Estimation.StrapdownINS.UKF.Covariance stateCovariance(
+  discrete Covariance stateCovariance(
     each start=0.0, each fixed=true);
   discrete Boolean initialized(start=false, fixed=true);
   discrete Boolean predictionSucceeded(start=false, fixed=true);
@@ -208,9 +208,9 @@ algorithm
      gpsTimestampConsumed_s,
      magnetometerTimestampConsumed_s,
      barometerTimestampConsumed_s,
-     opticalFlowTimestampConsumed_s) := Estimation.StrapdownINS.UKF.step(
+     opticalFlowTimestampConsumed_s) := step(
        pre(initialized),
-       Estimation.StrapdownINS.UKF.State(
+       State(
          positionWorldEnu_m=pre(statePositionWorldEnu_m),
          velocityWorldEnu_m_s=pre(stateVelocityWorldEnu_m_s),
          quaternionWorldBody=pre(stateQuaternionWorldBody),
@@ -258,13 +258,16 @@ algorithm
      estimate.angularVelocityWorldEnu_rad_s) :=
       Estimation.StrapdownINS.ESKF.navigationEstimate(
         Estimation.StrapdownINS.ESKF.State(
+          barometerBiasCrossCovariance=zeros(15),
+          barometerBias_m=0.0, barometerBiasVariance_m2=0.0, useJointBarometerBias=false,
           positionWorldEnu_m=statePositionWorldEnu_m,
           velocityWorldEnu_m_s=stateVelocityWorldEnu_m_s,
           quaternionWorldBody=stateQuaternionWorldBody,
           gyroscopeBiasBodyFlu_rad_s=stateGyroscopeBiasBodyFlu_rad_s,
           accelerometerBiasBodyFlu_m_s2=
             stateAccelerometerBiasBodyFlu_m_s2,
-          covariance=stateCovariance),
+          covariance=stateCovariance,
+        useSquareRootCovariance=false, covarianceRoot=zeros(15, 15)),
         imu, gravityWorldEnu_m_s2, initialized);
 
     acceptedCorrectionCount := if reset then 0
@@ -298,6 +301,15 @@ algorithm
     status.recoveryStage := Estimation.StrapdownINS.RecoveryNominal;
     status.anchorSource := correctionSource;
     status.imuPayloadHeld := not predictionSucceeded;
+    // The UKF has no automatic re-seed stage; a commanded reset is its only
+    // re-seed, so these report the constant "never" state honestly.
+    status.reseeded := false;
+    status.reseedCount := 0;
+    status.alignmentSource := Estimation.StrapdownINS.AlignmentNone;
+    status.alignmentSpecificForceBodyFlu_m_s2 := zeros(3);
+    status.quietElapsed_s := 0.0;
+    status.pseudoPositionCorrectionAccepted := false;
+    status.zeroVelocityCorrectionAccepted := false;
   end when;
 
 equation

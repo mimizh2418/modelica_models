@@ -1,23 +1,20 @@
 within Estimation.StrapdownINS.ESKF;
 
 function predict "Mixed SE_2(3) nominal and local error covariance prediction"
-  input Estimation.StrapdownINS.ESKF.State previous;
+  input State previous;
   input Real angularVelocityMeasuredBodyFlu_rad_s[3];
   input Real specificForceMeasuredBodyFlu_m_s2[3];
   input Real gravityWorldEnu_m_s2[3];
   input Real dt(unit = "s");
   input Estimation.StrapdownINS.ProcessNoise processNoise;
-  output Estimation.StrapdownINS.ESKF.State predicted;
+  output State predicted;
 protected
-  Estimation.StrapdownINS.ESKF.NominalState previousNominal;
-  Estimation.StrapdownINS.ESKF.NominalState predictedNominal;
+  NominalState previousNominal;
+  NominalState predictedNominal;
   Real correctedAngularVelocity[3];
   Real correctedSpecificForce[3];
   Real A[TangentLength, TangentLength];
-  Real G[TangentLength, ProcessNoiseLength];
   Real transition[TangentLength, TangentLength];
-  Estimation.StrapdownINS.ProcessNoiseCovariance continuousNoise;
-  Estimation.StrapdownINS.ESKF.Covariance discreteNoise;
 algorithm
   previousNominal := NominalState(
     positionWorldEnu_m=previous.positionWorldEnu_m,
@@ -36,12 +33,9 @@ algorithm
   correctedSpecificForce := specificForceMeasuredBodyFlu_m_s2
     - previous.accelerometerBiasBodyFlu_m_s2;
   A := continuousTransition(correctedAngularVelocity, correctedSpecificForce);
-  G := noiseInputMatrix();
   transition := discreteTransition(A, dt);
-  continuousNoise := processNoiseMatrix(processNoise);
-  discreteNoise := discreteProcessCovariance(
-    A, G, continuousNoise, dt);
-  predicted := Estimation.StrapdownINS.ESKF.State(
+  predicted := predictCovariance(previous, transition, A, processNoise, dt);
+  predicted := State(
     positionWorldEnu_m=predictedNominal.positionWorldEnu_m,
     velocityWorldEnu_m_s=predictedNominal.velocityWorldEnu_m_s,
     quaternionWorldBody=predictedNominal.quaternionWorldBody,
@@ -49,7 +43,11 @@ algorithm
       predictedNominal.gyroscopeBiasBodyFlu_rad_s,
     accelerometerBiasBodyFlu_m_s2=
       predictedNominal.accelerometerBiasBodyFlu_m_s2,
-    covariance=LinearAlgebra.symmetrize(
-      transition * previous.covariance * transpose(transition)
-        + discreteNoise));
+    covariance=predicted.covariance,
+    covarianceRoot=predicted.covarianceRoot,
+    barometerBiasCrossCovariance=predicted.barometerBiasCrossCovariance,
+    barometerBias_m=previous.barometerBias_m,
+    barometerBiasVariance_m2=previous.barometerBiasVariance_m2,
+    useJointBarometerBias=previous.useJointBarometerBias,
+    useSquareRootCovariance=previous.useSquareRootCovariance);
 end predict;

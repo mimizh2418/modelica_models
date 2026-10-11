@@ -23,8 +23,8 @@ model HorizonPredictorTests
   final parameter Real compositionZeroOrderHold[4] =
     Tests.HorizonChecks.compositionResidual(
       horizonEntries, samplePeriod, false);
-  // Half the sample period over the same span, to show the ONE quantity that
-  // does not agree exactly disagrees at second order rather than by a bug.
+  // Refine the sample period over the same span to check that the derivative
+  // composition identity also holds independently of the discretization.
   final parameter Real compositionRefined[4] =
     Tests.HorizonChecks.compositionResidual(
       2 * horizonEntries, 0.5 * samplePeriod, true);
@@ -127,10 +127,7 @@ model HorizonPredictorTests
   // (f) A composed window divided by its own earliest factor returns the rest
   // of the window EXACTLY. This is the enabling fact for maintaining the
   // window product across releases instead of refolding the ring on every
-  // correction, and it is measured rather than assumed because the design
-  // record asserts the opposite: docs/delayed-fusion-horizon.md rejects the
-  // peel partly because "the peel's bias Jacobians are only first order
-  // through the inverse, which is a silent error".
+  // correction. The assertions check the complete composed result.
   //
   // For the composition this package uses they are exact, and the reason is
   // structural rather than lucky. Read composeDelta as a map from the second
@@ -206,22 +203,12 @@ equation
   assert(compositionZeroOrderHold[3] < 1.0e-14,
     "Zero-order-hold composition disagrees in attitude");
 
-  // The bias Jacobians are the one output that is NOT claimed to agree
-  // exactly, and saying so is the point of this pair of assertions. The
-  // accumulating pass linearizes each interval about the midpoint of the
-  // running preintegral; the per-tick pass linearizes about the midpoint of
-  // its own interval. Halving the sample period over the same 200 ms span cut
-  // the disagreement from 1.73e-7 to 4.42e-8, a factor of 3.9, so it is second
-  // order in the step and not a defect in the composition. A first-order
-  // error, or a wrong chain rule, would fail the ratio test even while passing
-  // the magnitude test.
-  assert(compositionFirstOrderHold[4] < 1.0e-6,
-    "Composed bias Jacobians are further from the accumulating pass than the
-     second-order linearization difference explains");
-  assert(compositionRefined[4] < 0.4 * compositionFirstOrderHold[4],
-    "Bias Jacobian disagreement does not fall quadratically with the sample
-     period, so it is not the midpoint linearization difference it is
-     documented to be");
+  // Each interval now differentiates its actual closed-form increment.
+  // Composition and accumulation obey the same chain rule, so their bias
+  // Jacobians agree to roundoff, for both holds and both sample periods.
+  assert(compositionFirstOrderHold[4] < 1.0e-12 and
+    compositionZeroOrderHold[4] < 1.0e-12 and compositionRefined[4] < 1.0e-12,
+    "Composed bias Jacobians disagree with the accumulating pass");
 
   // ---- (b) re-base after a horizon correction -----------------------------
   // Measured: 1.2e-13 m, 3.9e-15 m/s, 2.6e-15 rad over 160 compositions from a

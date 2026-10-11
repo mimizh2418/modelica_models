@@ -9,6 +9,11 @@ certification. The checked rules and their MSL rationale are documented in
 Reusable Modelica building blocks for rigid-body simulation, estimation,
 control, and verification.
 
+Browse the [Modelica library reference](https://cognipilot.github.io/modelica_models/)
+for package and component help, public API tables and browsable source with
+definition links. The [project guides](docs/README.md) cover validation commands
+and consumer exports.
+
 This repository is the aerospace engineering workspace for CogniPilot vehicle
 development. Vehicle physics, flight-control source models, named vehicle
 parameterizations, avionics-facing plant interfaces, missions, and
@@ -39,12 +44,17 @@ artifacts; they do not own alternate copies of these models.
   `Multirotor.RateLoop` and `Multirotor.Allocation` inner-loop building blocks.
 - `Planning/`: forward-only bounded-curvature path planning, including all six
   classical Dubins path families.
+- `Vision/`: RGB-D features, matching, calibrated registration and camera
+  profiles, shared with the CogniPilot SLAM application.
+- `SLAM/`: localization, mapping, loop closure, pose graphs, visual fusion and
+  examples. The existing world-additive visual inertial reference is under
+  `SLAM.Inertial`; the navigation ESKF remains under `Estimation.StrapdownINS`.
 - `Vehicles/Templates/`: parameterized fixed-wing and quadrotor plants.
 - `Vehicles/Cubs2/` and `Vehicles/Rdd2/`: named parameterizations,
   flight-control models, avionics plant interfaces, and qualification missions.
   RDD2 includes both its cascaded sampled controller and a thin vehicle
   parameterization of the reusable log-linear controller.
-- `tools/`: non-library Python orchestration for validation, qualification,
+- [`tools/`](tools/README.md): non-library Python orchestration for validation, qualification,
   export, CI caching, and reports. Nothing under this directory is part of the
   Modelica package API.
 
@@ -53,6 +63,11 @@ the same separation used by the
 [Modelica Standard Library](https://github.com/modelica/ModelicaStandardLibrary).
 The structure check validates `within` declarations, `package.order` coverage,
 and package metadata without requiring Nix.
+
+Library help is embedded in Modelica HTML documentation. The
+[project guides](docs/README.md) cover validation and the
+[compatibility export](docs/slam-export.md) for `slam_web`. Local visual comparison
+algorithms are Modelica; native probes only supply inputs and collect outputs.
 
 ## Navigation estimator boundary
 
@@ -80,11 +95,16 @@ comparison is meaningful.
 
 Sensor `timestamp_s` is capture time. `valid` may remain true while a usable
 sample is held; `fresh` pulses for one estimator tick when a new sample arrives,
-preventing a slow sensor value from being fused repeatedly. Latency compensation
-belongs in a reusable fixed-lag wrapper over a private estimator-backend contract:
-the wrapper buffers backend snapshots and IMU increments, corrects at the capture
-time, and replays prediction to the present. This keeps replay logic shared while
-allowing each backend to retain its own opaque state and uncertainty model.
+preventing a slow sensor value from being fused repeatedly.
+`Estimation.FusionHorizon.HorizonEstimator` wraps the same filter backend with
+delayed aiding queues and inertial buffers, then predicts its corrected state to
+the present. Direct retrodiction and delayed fusion share ESKF prediction and
+correction functions; they are different timing strategies, not separate filters.
+The current ESKF accounts for the [uncertainty and correlation of the held IMU
+packet](Estimation/StrapdownINS/ESKF/correctGps.mo) used by its delayed GPS approximation.
+The paired GPS-to-Mocap missions [measure the survey offset against an ideal
+control mission](Vehicles/Rdd2/Test/package.mo) while retaining each source's
+flight and consistency limits.
 
 The CUBS2 deployment boundary is intentionally narrower than the closed-loop
 test model. `Vehicles.Cubs2.OuterLoop` is the deployable Modelica controller;
@@ -362,7 +382,12 @@ To regenerate only the planning artifacts:
 modelica-models test plots
 ```
 
-CI uses the same Python commands. Its optional Nix layer pins compiler binaries
+CI uses the same Python commands. The optional Nix layer uses released Rumoca
+0.10.2 for both the CLI and Python bindings. Its Python dependency override
+corrects the release's stale Cargo vendor hash without patching compiler code.
+The Rumoca checks compile and execute a C99 UKF prediction regression. Native
+use requires `cc` or `MODELICA_MODELS_CC`; the Nix application supplies its compiler.
+The layer pins compiler binaries
 and caches only the Rumoca runtime when that pin changes. OpenModelica runs the complete
 assertion simulation using the pinned container image, with a local `omc` as
 the fallback when Docker is unavailable. Rumoca independently parses, resolves, flattens, and lowers
@@ -370,6 +395,11 @@ the same `Tests.All` model to DAE form, then executes SO(2) and SE(2) assertion
 smoke models with its simulation backend. The complete assertion model remains
 the OpenModelica simulation authority because Rumoca does not yet structurally
 lower every aggregate static assertion and array-valued dynamic equation.
+
+RDD2 waypoint qualification runs each scenario in a fresh process. CI runs
+four scenarios concurrently; local runs default to one. Set `RDD2_SIM_WORKERS`
+to choose the concurrency, for example `RDD2_SIM_WORKERS=4 nix run . -- qualify
+rdd2`. Every configured scenario and its original assertions remain required.
 
 ## Replaceable rotation representations
 
@@ -470,19 +500,6 @@ singular or locally reversed offset curve.
 
 ## License
 
-This repository is licensed under the Apache License, Version 2.0. See
-[LICENSE](LICENSE). Every Modelica source here is original CogniPilot content
-under that license; the repository carries no third-party-derived source.
-
-`Ekf2/`, a statement-for-statement transcription of PX4-Autopilot's ekf2
-module and therefore BSD-3-Clause, was relocated out of this repository for
-that reason. It is maintained separately, outside CogniPilot, as a PX4-parity
-oracle for cross-validating the estimators here. Oracles are consumed only as
-external comparators, checked out at benchmark time with only their outputs
-compared, never vendored back in. The estimators in this repository derive
-from papers and specifications, with citations, and not from that
-transcription.
-
-[NOTICE](NOTICE) indexes the third-party content redistributed here: the
-NOAA/NCEI and BGS World Magnetic Model in `Geodesy/WMM2025/`, and the
-CogniPilot Python implementations that three packages follow.
+Project-authored code uses the [Apache-2.0 license](LICENSE).
+[NOTICE](NOTICE) records source attributions and third-party material.
+See [estimator licensing](docs/licensing.md) for native validation boundaries.

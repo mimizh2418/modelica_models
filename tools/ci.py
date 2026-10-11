@@ -13,7 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from typing import NoReturn, Sequence
+from typing import Sequence
 
 
 OPENMODELICA_IMAGE = "openmodelica/openmodelica:v1.27.0-minimal"
@@ -42,9 +42,34 @@ def main(arguments: Sequence[str] | None = None) -> int:
 
     try:
         repository = find_repository_root(Path.cwd())
+        if options.command in ("test", "ci"):
+            run_command(
+                [
+                    sys.executable,
+                    "-m",
+                    "unittest",
+                    "Vehicles.Rdd2.Test.test_waypoint_qualification",
+                ],
+                repository,
+                "Waypoint qualification negative controls",
+            )
         if options.command in ("test", "ci", "omc"):
             run_openmodelica_tests(repository)
         if options.command in ("test", "ci", "rumoca"):
+            run_command(
+                [
+                    sys.executable,
+                    "-m",
+                    "unittest",
+                    "discover",
+                    "-s",
+                    "tools/estimator_comparison",
+                    "-p",
+                    "test_*.py",
+                ],
+                repository,
+                "Estimator scoring and IMU calibration regressions",
+            )
             run_rumoca_tests(repository)
         if options.command in ("test", "ci", "plots"):
             run_planning_plots(repository)
@@ -97,21 +122,64 @@ def run_rumoca_tests(repository: Path) -> None:
             repository,
             "Rumoca DAE lowering for Tests.All",
         )
-        for model, filename in (
-            ("Tests.LieGroupTests.SO2", "SO2.html"),
-            ("Tests.LieGroupTests.SE2", "SE2.html"),
+        # DAE and eFMI export can succeed even when the composed mission's
+        # simulation event plan is invalid. Initialize the UKF missions here
+        # so this compiler boundary fails before the long qualification runs.
+        # The held-GPS seed fixture runs across multiple estimator ticks to
+        # check covariance admission and prevent duplicate packet fusion.
+        for model_file, model, end_time, filename in (
+            ("Tests/package.mo", "Tests.LieGroupTests.SO2", "0.0", "SO2.html"),
+            ("Tests/package.mo", "Tests.LieGroupTests.SE2", "0.0", "SE2.html"),
+            (
+                "Tests/package.mo",
+                "Tests.CovarianceRootTests",
+                "0.0",
+                "covariance-root.html",
+            ),
+            (
+                "Vehicles/Rdd2/Test/UkfWaypointMission.mo",
+                "Vehicles.Rdd2.Test.UkfWaypointMission",
+                "0.0",
+                "ukf-waypoint-init.html",
+            ),
+            (
+                "Vehicles/Rdd2/Test/UkfGlobalWaypointMission.mo",
+                "Vehicles.Rdd2.Test.UkfGlobalWaypointMission",
+                "0.0",
+                "ukf-global-waypoint-init.html",
+            ),
+            (
+                "Tests/package.mo",
+                "Tests.StrapdownEstimatorInterfaceTests",
+                "0.02",
+                "strapdown-interface.html",
+            ),
+            (
+                "Tests/package.mo",
+                "Tests.StrapdownGpsSeedTests",
+                "0.02",
+                "strapdown-gps-seed.html",
+            ),
+            (
+                "Tests/package.mo",
+                "Tests.StrapdownGpsSeedTimestampTests",
+                "0.02",
+                "strapdown-gps-seed-timestamp.html",
+            ),
         ):
             run_command(
                 [
                     rumoca,
                     "sim",
-                    "Tests/package.mo",
+                    model_file,
                     "--model",
                     model,
                     "--source-root",
                     str(repository),
                     "--t-end",
-                    "0.0",
+                    end_time,
+                    "--solver",
+                    "rk-like",
                     "--output",
                     str(output / filename),
                 ],
@@ -168,6 +236,41 @@ def run_rumoca_tests(repository: Path) -> None:
                 "--emit",
                 "dae-json",
                 "strapdown-estimator-interface.dae.json",
+            ),
+            (
+                "Tests/SemiDirectBiasCorrectionReplay.mo",
+                "Tests.SemiDirectBiasCorrectionReplay",
+                "--target",
+                "galec-production",
+                "eskf-correction-kernel",
+            ),
+            (
+                "Tests/CovarianceRootReplay.mo",
+                "Tests.CovarianceRootReplay",
+                "--target",
+                "galec-production",
+                "covariance-root-kernel",
+            ),
+            (
+                "Tests/RawPredictionReplay.mo",
+                "Tests.RawPredictionReplay",
+                "--target",
+                "galec-production",
+                "raw-prediction-kernel",
+            ),
+            (
+                "Tests/SquareRootCorrectionReplay.mo",
+                "Tests.SquareRootCorrectionReplay",
+                "--target",
+                "galec-production",
+                "square-root-correction-kernel",
+            ),
+            (
+                "Tests/BarometerConsiderReplay.mo",
+                "Tests.BarometerConsiderReplay",
+                "--target",
+                "galec-production",
+                "barometer-consider-kernel",
             ),
             (
                 "Estimation/FusionHorizon/OutputPredictor.mo",
@@ -238,36 +341,379 @@ def run_rumoca_tests(repository: Path) -> None:
                 f"Rumoca {format_name} compile for {model_name}",
             )
 
+        check_eskf_native(repository, output)
+        check_eskf_correction(repository, output)
+        check_eskf_correction(repository, output, square_root=True)
+        suffix = {"win32": ".dll", "darwin": ".dylib"}.get(sys.platform, ".so")
+        run_command(
+            [
+                sys.executable,
+                str(
+                    repository
+                    / "tools/estimator_comparison/check_correction_covariance.py"
+                ),
+                "--dense",
+                str(output / ("eskf-correction-kernel" + suffix)),
+                "--root",
+                str(output / ("square-root-correction-kernel" + suffix)),
+                "--output",
+                str(output / "correction-joint-covariance.json"),
+            ],
+            repository,
+            "Reject impossible ESKF error/noise covariances",
+        )
+        check_covariance_root(repository, output)
+        check_barometer_consider(repository, output)
+        check_raw_prediction(repository, output)
+        check_horizon_native(repository, output)
+        check_ukf_native(repository, rumoca, output)
         check_pin_dependent_lowering(repository, rumoca, output)
 
 
+def check_eskf_native(repository: Path, output: Path) -> None:
+    """Check simultaneous corrections through the actual deployment export."""
+    compiler = program("MODELICA_MODELS_CC", None, "cc")
+    require_program(compiler, "C99 compiler for the ESKF aiding regression")
+    code = output / "rdd2-estimator/Vehicles_Rdd2_NavigationEstimator/ProductionCode"
+    objects = []
+    for source in ("Vehicles_Rdd2_NavigationEstimator", "rumoca_galec_kernels"):
+        object_file = output / (source + ".o")
+        run_command(
+            [
+                compiler,
+                "-std=c99",
+                "-O2",
+                "-I" + str(code),
+                "-c",
+                str(code / (source + ".c")),
+                "-o",
+                str(object_file),
+            ],
+            repository,
+            "Build ESKF generated C " + source,
+        )
+        objects.append(str(object_file))
+    for probe, defines in (
+        ("eskf_aiding", []),
+        ("barometer_datum", []),
+        ("barometer_consider_datum", []),
+        ("barometer_consider_datum", ["-DJOINT_BAROMETER_BIAS"]),
+    ):
+        label = probe + ("-joint" if defines else "")
+        executable = output / (label + "-test.exe")
+        run_command(
+            [
+                compiler,
+                "-std=c99",
+                "-O2",
+                *defines,
+                "-I" + str(code),
+                str(repository / "tools/estimator_comparison" / (probe + ".c")),
+                *objects,
+                "-lm",
+                "-o",
+                str(executable),
+            ],
+            repository,
+            "Build ESKF generated C regression " + label,
+        )
+        run_command([str(executable)], repository, "ESKF generated C " + label)
+
+
+def check_eskf_correction(
+    repository: Path, output: Path, square_root: bool = False
+) -> None:
+    """Compare deployment corrections with an independent float64 reference."""
+    compiler = program("MODELICA_MODELS_CC", None, "cc")
+    require_program(compiler, "C99 compiler for the ESKF correction regression")
+    probe = "square-root-correction" if square_root else "eskf-correction"
+    model = (
+        "SquareRootCorrectionReplay"
+        if square_root
+        else "SemiDirectBiasCorrectionReplay"
+    )
+    bridge = "square_root_correction.c" if square_root else "semidirect_correction.c"
+    code = output / f"{probe}-kernel/Tests_{model}/ProductionCode"
+    suffix = {"win32": ".dll", "darwin": ".dylib"}.get(sys.platform, ".so")
+    library = output / (probe + "-kernel" + suffix)
+    run_command(
+        [
+            compiler,
+            "-std=c99",
+            "-O2",
+            "-pipe",
+            "-fPIC",
+            "-dynamiclib" if sys.platform == "darwin" else "-shared",
+            "-I" + str(code),
+            str(repository / "tools/estimator_comparison" / bridge),
+            str(code / f"Tests_{model}.c"),
+            str(code / "rumoca_galec_kernels.c"),
+            "-lm",
+            "-o",
+            str(library),
+        ],
+        repository,
+        "Build ESKF generated C correction regression",
+    )
+    for seed in (20261007, 911):
+        run_command(
+            [
+                sys.executable,
+                str(
+                    repository
+                    / "tools/estimator_comparison/check_semidirect_correction.py"
+                ),
+                "--library",
+                str(library),
+                "--seed",
+                str(seed),
+                "--output",
+                str(output / f"{probe}-{seed}.json"),
+            ],
+            repository,
+            f"Independent ESKF correction regression, seed {seed}",
+        )
+
+
+def check_barometer_consider(repository: Path, output: Path) -> None:
+    compiler = program("MODELICA_MODELS_CC", None, "cc")
+    require_program(compiler, "C99 compiler for pressure-datum regression")
+    code = (
+        output
+        / "barometer-consider-kernel/Tests_BarometerConsiderReplay/ProductionCode"
+    )
+    suffix = {"win32": ".dll", "darwin": ".dylib"}.get(sys.platform, ".so")
+    library = output / ("barometer-consider-kernel" + suffix)
+    run_command(
+        [
+            compiler,
+            "-std=c99",
+            "-O2",
+            "-pipe",
+            "-fPIC",
+            "-dynamiclib" if sys.platform == "darwin" else "-shared",
+            "-I" + str(code),
+            str(repository / "tools/estimator_comparison/barometer_consider.c"),
+            str(code / "Tests_BarometerConsiderReplay.c"),
+            str(code / "rumoca_galec_kernels.c"),
+            "-lm",
+            "-o",
+            str(library),
+        ],
+        repository,
+        "Build generated pressure-datum consider regression",
+    )
+    for checker, label in (
+        ("check_barometer_consider", "barometer-consider"),
+        ("check_joint_barometer", "joint-barometer"),
+    ):
+        for seed in (20261008, 911):
+            run_command(
+                [
+                    sys.executable,
+                    str(repository / "tools/estimator_comparison" / (checker + ".py")),
+                    "--library",
+                    str(library),
+                    "--seed",
+                    str(seed),
+                    "--output",
+                    str(output / f"{label}-{seed}.json"),
+                ],
+                repository,
+                f"Independent {label} regression, seed {seed}",
+            )
+
+
+def check_raw_prediction(repository: Path, output: Path) -> None:
+    compiler = program("MODELICA_MODELS_CC", None, "cc")
+    require_program(compiler, "C99 compiler for raw ESKF prediction")
+    code = output / "raw-prediction-kernel/Tests_RawPredictionReplay/ProductionCode"
+    suffix = {"win32": ".dll", "darwin": ".dylib"}.get(sys.platform, ".so")
+    library = output / ("raw-prediction-kernel" + suffix)
+    run_command(
+        [
+            compiler,
+            "-std=c99",
+            "-O2",
+            "-pipe",
+            "-fPIC",
+            "-dynamiclib" if sys.platform == "darwin" else "-shared",
+            "-I" + str(code),
+            str(repository / "tools/estimator_comparison/raw_prediction.c"),
+            str(code / "Tests_RawPredictionReplay.c"),
+            str(code / "rumoca_galec_kernels.c"),
+            "-lm",
+            "-o",
+            str(library),
+        ],
+        repository,
+        "Build raw ESKF prediction regression",
+    )
+    for seed in (20261007, 20271008):
+        run_command(
+            [
+                sys.executable,
+                str(repository / "tools/estimator_comparison/check_raw_prediction.py"),
+                "--library",
+                str(library),
+                "--seed",
+                str(seed),
+                "--output",
+                str(output / f"raw-prediction-{seed}.json"),
+            ],
+            repository,
+            f"Independent raw prediction regression, seed {seed}",
+        )
+
+
+def check_covariance_root(repository: Path, output: Path) -> None:
+    """Check float32 QR factors, including the captured failing covariance reset."""
+    compiler = program("MODELICA_MODELS_CC", None, "cc")
+    require_program(compiler, "C99 compiler for the covariance-root regression")
+    code = output / "covariance-root-kernel/Tests_CovarianceRootReplay/ProductionCode"
+    suffix = {"win32": ".dll", "darwin": ".dylib"}.get(sys.platform, ".so")
+    library = output / ("covariance-root-kernel" + suffix)
+    run_command(
+        [
+            compiler,
+            "-std=c99",
+            "-O2",
+            "-pipe",
+            "-fPIC",
+            "-dynamiclib" if sys.platform == "darwin" else "-shared",
+            "-I" + str(code),
+            str(repository / "tools/estimator_comparison/covariance_root.c"),
+            str(code / "Tests_CovarianceRootReplay.c"),
+            str(code / "rumoca_galec_kernels.c"),
+            "-lm",
+            "-o",
+            str(library),
+        ],
+        repository,
+        "Build generated C covariance-root regression",
+    )
+    for seed in (20271007, 20271008):
+        run_command(
+            [
+                sys.executable,
+                str(repository / "tools/estimator_comparison/check_covariance_root.py"),
+                "--library",
+                str(library),
+                "--seed",
+                str(seed),
+                "--output",
+                str(output / f"covariance-root-{seed}.json"),
+            ],
+            repository,
+            f"Independent covariance-root regression, seed {seed}",
+        )
+
+
+def check_horizon_native(repository: Path, output: Path) -> None:
+    """Check horizon epochs in float32 through startup, reset and a long replay."""
+    compiler = program("MODELICA_MODELS_CC", None, "cc")
+    require_program(compiler, "C99 compiler for the horizon epoch regression")
+    code = (
+        output
+        / "fusion-horizon-output-predictor/Estimation_FusionHorizon_OutputPredictor/ProductionCode"
+    )
+    executable = output / "horizon-epoch-test.exe"
+    run_command(
+        [
+            compiler,
+            "-std=c99",
+            "-O2",
+            "-pipe",
+            "-I" + str(code),
+            str(repository / "tools/estimator_comparison/horizon_epoch.c"),
+            str(code / "Estimation_FusionHorizon_OutputPredictor.c"),
+            str(code / "rumoca_galec_kernels.c"),
+            "-lm",
+            "-o",
+            str(executable),
+        ],
+        repository,
+        "Build horizon generated C epoch regression",
+    )
+    run_command([str(executable)], repository, "Horizon generated C epoch regression")
+
+
+def check_ukf_native(repository: Path, rumoca: str, output: Path) -> None:
+    """Check generated prediction numerics, not just schema-valid export."""
+    compiler = program("MODELICA_MODELS_CC", None, "cc")
+    require_program(compiler, "C99 compiler for the UKF codegen regression")
+    export = output / "ukf-hover"
+    run_command(
+        [
+            rumoca,
+            "compile",
+            "Tests/UKFHoverCodegen.mo",
+            "--model",
+            "Tests.UKFHoverCodegen",
+            "--source-root",
+            str(repository),
+            "--target",
+            "galec-production",
+            "--output",
+            str(export),
+        ],
+        repository,
+        "Rumoca UKF hover code generation",
+    )
+    code = export / "Tests_UKFHoverCodegen" / "ProductionCode"
+    executable = output / "ukf-hover-test.exe"
+    run_command(
+        [
+            compiler,
+            "-std=c99",
+            "-O2",
+            "-I" + str(code),
+            str(repository / "tools/estimator_comparison/ukf_hover.c"),
+            str(code / "Tests_UKFHoverCodegen.c"),
+            str(code / "rumoca_galec_kernels.c"),
+            "-lm",
+            "-o",
+            str(executable),
+        ],
+        repository,
+        "Build UKF generated C hover regression",
+    )
+    run_command([str(executable)], repository, "UKF generated C hover regression")
+
+
 # Models that do not lower today for one identified upstream reason, recorded
-# with the exact number the reason predicts.
+# with the exact diagnostic and source location.
 #
 # This is not an ignore list. The entry fails the build if the model stops
 # lowering for a DIFFERENT reason, which is the case an ignore list hides, and
 # it says so plainly when the model starts lowering, which is the moment the
 # entry should be promoted into named_models above and this table shrink.
 #
-# The cause: Rumoca does not count the BOOLEAN components of a sub-block's
-# input connector among the unknowns, while the whole-record pass-through
-# equality still contributes their equations. A seventeen-line reproducer and
-# the bisection are in tools/rumoca-repros/connector-boolean-balance/. The fix
-# is upstream and in flight.
+# The 0.10.2 pin reaches canonical DAE construction, where a fast sampled
+# consumer cannot read a slower sampled producer. This ordinary discrete
+# model is incorrectly treated as a cross-clock read.
+# Diagnostic identities and source locations deliberately belong to this pin:
+# changing the compiler or this assignment requires reviewing the boundary.
 PIN_DEPENDENT_MODELS = (
     (
         "Estimation/FusionHorizon/HorizonEstimator.mo",
         "Estimation.FusionHorizon.HorizonEstimator",
-        26,
-        "14 Booleans on the filter's six input connectors plus 12 on the "
-        "aiding buffer's five",
+        "identity 590 is not owned by clock identity 0",
+        "Estimation/FusionHorizon/HorizonEstimator.mo:259:5",
+        "filterPositionHeld_m := filter.estimate.positionWorldEnu_m",
     ),
 )
 
 
 def check_pin_dependent_lowering(repository: Path, rumoca: str, output: Path) -> None:
     print("==> Rumoca composed-model lowering (pin dependent)", flush=True)
-    for model_file, model_name, expected_excess, cause in PIN_DEPENDENT_MODELS:
+    for (
+        model_file,
+        model_name,
+        expected_error,
+        location,
+        assignment,
+    ) in PIN_DEPENDENT_MODELS:
         completed = subprocess.run(
             [
                 rumoca,
@@ -288,33 +734,25 @@ def check_pin_dependent_lowering(repository: Path, rumoca: str, output: Path) ->
         )
         if completed.returncode == 0:
             print(
-                f"    {model_name} now lowers. The connector Boolean balance "
+                f"    {model_name} now lowers. The recorded compiler "
                 "gap has closed: move this entry into named_models and delete "
                 "it from PIN_DEPENDENT_MODELS.",
                 flush=True,
             )
             continue
-        diagnostics = completed.stdout + completed.stderr
-        balance = re.search(
-            r"unbalanced model: (\d+) equations, (\d+) unknowns", diagnostics
-        )
-        if balance is None:
+        diagnostics = re.sub(r"\x1b\[[0-9;]*m", "", completed.stdout + completed.stderr)
+        if not all(
+            marker in diagnostics
+            for marker in ("[ED020]", expected_error, location, assignment)
+        ):
             raise TaskError(
                 f"{model_name} failed to lower for a reason that is NOT the "
-                "recorded connector Boolean balance gap, so a new defect has "
+                "recorded multi-rate sampled-read gap, so a new defect has "
                 f"been introduced:\n{diagnostics}"
             )
-        excess = int(balance.group(1)) - int(balance.group(2))
-        if excess != expected_excess:
-            raise TaskError(
-                f"{model_name} is unbalanced by {excess} equations where the "
-                f"recorded connector Boolean gap predicts {expected_excess} "
-                f"({cause}). Either the boundary changed or a second cause has "
-                "appeared; neither may pass silently."
-            )
         print(
-            f"    {model_name} unbalanced by {expected_excess} as expected "
-            f"({cause})",
+            f"    {model_name} reaches the recorded multi-rate sampled-read "
+            f"boundary at {location} ({expected_error})",
             flush=True,
         )
 
@@ -369,9 +807,7 @@ def run_omc_script(repository: Path, script: str) -> None:
     if executable_exists(omc):
         environment = os.environ.copy()
         default_library = Path.home() / ".openmodelica" / "libraries"
-        inherited_library = environment.get(
-            "OPENMODELICALIBRARY", str(default_library)
-        )
+        inherited_library = environment.get("OPENMODELICALIBRARY", str(default_library))
         environment["OPENMODELICALIBRARY"] = os.pathsep.join(
             (str(repository), inherited_library)
         )
@@ -409,7 +845,11 @@ def program(environment: str, packaged: str | None, fallback: str) -> str:
 
 def executable_exists(executable: str) -> bool:
     path = Path(executable)
-    return path.is_file() if path.parent != Path(".") else shutil.which(executable) is not None
+    return (
+        path.is_file()
+        if path.parent != Path(".")
+        else shutil.which(executable) is not None
+    )
 
 
 def require_program(executable: str, label: str) -> None:
@@ -476,7 +916,12 @@ def render_planning_plots(directory: Path) -> None:
     families = read_csv_columns(directory / "dubins_families_res.csv")
     figure, axes = plt.subplots(figsize=(10, 6.25), dpi=160, layout="constrained")
     for name in ("lsl", "rsr", "lsr", "rsl", "rlr", "lrl"):
-        axes.plot(families[f"{name}.x"], families[f"{name}.y"], linewidth=2, label=name.upper())
+        axes.plot(
+            families[f"{name}.x"],
+            families[f"{name}.y"],
+            linewidth=2,
+            label=name.upper(),
+        )
     configure_path_axes(axes, "All Six Dubins Path Families")
     axes.legend(loc="center left", bbox_to_anchor=(1.02, 0.5))
     figure.savefig(directory / "dubins_families.png")
@@ -495,12 +940,15 @@ def render_planning_plots(directory: Path) -> None:
     waypoint_distances = [0.0]
     for leg_length in leg_lengths:
         waypoint_distances.append(waypoint_distances[-1] + leg_length)
-    closed_flightplan = math.hypot(
-        trajectory[f"{legs[0]}.nominalX"][0]
-        - trajectory[f"{legs[-1]}.nominalX"][-1],
-        trajectory[f"{legs[0]}.nominalY"][0]
-        - trajectory[f"{legs[-1]}.nominalY"][-1],
-    ) < 1.0e-8
+    closed_flightplan = (
+        math.hypot(
+            trajectory[f"{legs[0]}.nominalX"][0]
+            - trajectory[f"{legs[-1]}.nominalX"][-1],
+            trajectory[f"{legs[0]}.nominalY"][0]
+            - trajectory[f"{legs[-1]}.nominalY"][-1],
+        )
+        < 1.0e-8
+    )
     figure, axes = plt.subplots(figsize=(10, 6.25), dpi=160, layout="constrained")
     for index, leg in enumerate(legs):
         axes.plot(
@@ -526,9 +974,7 @@ def render_planning_plots(directory: Path) -> None:
         )
         add_boundary_pose(axes, trajectory, leg, 0, waypoint_label)
     if not closed_flightplan:
-        add_boundary_pose(
-            axes, trajectory, legs[-1], -1, f"WP{len(legs) + 1}"
-        )
+        add_boundary_pose(axes, trajectory, legs[-1], -1, f"WP{len(legs) + 1}")
     configure_path_axes(
         axes, "Figure-Eight Flight Plan with Coincident Center Waypoints"
     )
@@ -581,8 +1027,7 @@ def render_planning_plots(directory: Path) -> None:
             for value in trajectory[f"{leg}.nominalPathDistance"]
         ]
         bank_angle_degrees = [
-            math.degrees(value)
-            for value in trajectory[f"{leg}.coordinatedBankAngle"]
+            math.degrees(value) for value in trajectory[f"{leg}.coordinatedBankAngle"]
         ]
         axes.plot(
             mission_distance,
@@ -606,9 +1051,7 @@ def render_planning_plots(directory: Path) -> None:
     plt.close(figure)
 
     examples = read_csv_columns(directory / "dubins_polynomial_examples_res.csv")
-    figure, axes = plt.subplots(
-        2, 2, figsize=(10, 8), dpi=160, layout="constrained"
-    )
+    figure, axes = plt.subplots(2, 2, figsize=(10, 8), dpi=160, layout="constrained")
     for case_index, axes_item in enumerate(axes.flat, start=1):
         prefix = f"case{case_index}"
         axes_item.plot(

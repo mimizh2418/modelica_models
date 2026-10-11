@@ -7,21 +7,51 @@ function initialize "Initialize the geometric error-state filter"
   input Real initialVelocityWorldEnu_m_s[3] = zeros(3);
   input Real initialGyroscopeBiasBodyFlu_rad_s[3] = zeros(3);
   input Real initialAccelerometerBiasBodyFlu_m_s2[3] = zeros(3);
-  output Estimation.StrapdownINS.ESKF.State state;
+  input Real initialPositionCovarianceWorld_m2[3, 3] = zeros(3, 3)
+    "Covariance of an aiding position used as the seed; zero keeps configured priors";
+  input Boolean useSquareRootCovariance = false;
+  input Real barometerBias_m = 0.0;
+  input Real barometerBiasVariance_m2 = 0.0;
+  input Boolean useJointBarometerBias = false;
+  output State state;
 protected
-  Estimation.StrapdownINS.ESKF.Covariance initialCovariance;
+  Covariance initialCovariance;
 algorithm
   initialCovariance := diagonal(cat(1,
-    variances.position_m2,
+    seedPositionVariances(initialPositionCovarianceWorld_m2,
+      quaternionWorldBody, variances.position_m2),
     variances.velocity_m2_s2,
     variances.attitude_rad2,
     variances.gyroscopeBias_rad2_s2,
     variances.accelerometerBias_m2_s4));
-  state := Estimation.StrapdownINS.ESKF.State(
+  state := State(
     positionWorldEnu_m=positionWorldEnu_m,
     velocityWorldEnu_m_s=initialVelocityWorldEnu_m_s,
     quaternionWorldBody=LieGroups.SO3.Quat.normalize(quaternionWorldBody),
     gyroscopeBiasBodyFlu_rad_s=initialGyroscopeBiasBodyFlu_rad_s,
     accelerometerBiasBodyFlu_m_s2=initialAccelerometerBiasBodyFlu_m_s2,
-    covariance=initialCovariance);
+    covariance=initialCovariance,
+    useSquareRootCovariance=useSquareRootCovariance,
+    barometerBiasCrossCovariance=zeros(TangentLength),
+    barometerBias_m=barometerBias_m,
+    barometerBiasVariance_m2=barometerBiasVariance_m2,
+    useJointBarometerBias=useJointBarometerBias,
+    covarianceRoot=if useSquareRootCovariance then diagonal(
+      {sqrt(initialCovariance[axis, axis]) for axis in 1:TangentLength})
+      else zeros(TangentLength, TangentLength));
+  annotation(Documentation(info = "<html>
+    <h4>Initial state and uncertainty</h4>
+<p>Supply world ENU position and velocity, a body-FLU-to-world quaternion and
+body-frame IMU biases. The quaternion is normalized. The initial covariance
+uses the {position, velocity, attitude, gyro bias, accelerometer bias} tangent
+ordering; variance inputs are squared physical units, not standard deviations.</p>
+<p>If an aiding position seeds the state, supply its world-frame covariance.
+The initializer rotates it to the local tangent and retains conservative
+configured variance floors. Zero optional seed covariance keeps the configured
+prior. Initialization does not itself execute prediction or sensor fusion.</p>
+<p>Use <a href=\"modelica://Estimation.StrapdownINS.ESKF.Estimator\">Estimator</a>
+for sampled lifecycle handling or carry the returned
+<a href=\"modelica://Estimation.StrapdownINS.ESKF.State\">State</a> explicitly
+between prediction and correction calls.</p>
+    </html>"));
 end initialize;

@@ -5,3 +5,9 @@ contractionResidual
 solve
 solveSPD
 josephUpdate
+transformCovariance
+covarianceRoot
+factorPSD
+solveLower
+solveCovarianceRoot
+SPD6Solve

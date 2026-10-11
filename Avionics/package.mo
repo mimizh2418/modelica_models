@@ -158,9 +158,10 @@ package Avionics
        attempted, 1 accepted, 2 rejected as not finite, 3 rejected by the
        innovation gate, 4 rejected because the innovation covariance did
        not factor, 5 rejected because the sensor-reported measurement
-       covariance was not finite or claimed non-positive noise. Every
-       rejection cause is named rather than inferred from the absence of
-       other flags";
+       covariance was not finite or claimed non-positive noise, 7 the state
+       was re-seeded from a fresh anchor sample by the automatic recovery
+       ladder. Every outcome is named rather than inferred from the absence
+       of other flags";
     Integer acceptedCorrectionCount
       "Monotonic count of SHIFTED FUSION INSTANTS since the last reset: the
        number of estimator ticks on which at least one aiding correction was
@@ -174,11 +175,8 @@ package Avionics
        counting them twice would ask for a second recomposition that has
        nothing to recompose.
 
-       Both shipped filters satisfy the contract by construction rather than
-       by arithmetic, because each fuses at most one source per tick from a
-       priority chain, so their per-tick outcome is a single value. A filter
-       that fused several sources in one tick would have to coalesce them here
-       and must not increment per measurement: at a delayed fusion horizon
+       A filter fusing several sources in one tick coalesces their acceptance
+       flags here and must not increment per measurement: at a delayed fusion horizon
        every ripe measurement is an accepted correction, and the aiding set of
        a small multirotor offers well over a hundred a second against a
        recomposition budget of single digits.
@@ -194,7 +192,10 @@ package Avionics
        here and not reconstructed downstream";
     Integer correctionSource
       "Aiding source the outcome above refers to: 0 none, 1 mocap, 2 GPS,
-       3 optical flow, 4 magnetometer, 5 barometer";
+       3 optical flow, 4 magnetometer, 5 barometer. With multiple corrections,
+       ESKF reports the first attempted source in priority order mocap, GPS,
+       optical flow, barometer, magnetometer. Per-source acceptance flags
+       describe the other corrections independently";
     Real normalizedInnovationSquared
       "NIS of this tick's attempted aiding correction; zero if none was attempted";
     Integer recoveryStage
@@ -214,9 +215,12 @@ package Avionics
        the vehicle flying, so stage 2 raises this field and leaves valid
        alone.
 
-       The estimator never re-seeds its own state from an aiding stream it
-       is rejecting; a deliberate commanded reset is the only path that
-       re-seeds";
+       An optional third stage, off by default and enabled per deployment,
+       re-seeds position and velocity from a fresh anchor sample once the
+       divergence has outlasted a longer window; it is reported on the
+       separate reseeded flag and reseedCount rather than as a distinct
+       recoveryStage value, so a filter with the stage disabled reports only
+       stages 0 to 2 and a commanded reset stays the only other re-seed";
     Boolean imuPayloadHeld
       "True when this tick`s published IMU-derived outputs -- angular
        velocity, world acceleration and the estimate timestamp -- were held
@@ -234,6 +238,36 @@ package Avionics
       "Source currently anchoring the solution, by the same Source* codes
        as correctionSource. The recovery ladder is timed on this source
        alone, and a change of anchor restarts that timing";
+    Boolean reseeded
+      "True on the tick the automatic recovery ladder re-seeded the state
+       from a fresh anchor sample. It is an OPTIONAL, off-by-default stage,
+       so on a filter that leaves it disabled this is always false and the
+       commanded reset input is the only path that re-seeds. When it fires,
+       correctionOutcome carries the CorrectionReseeded code rather than an
+       acceptance code";
+    Integer reseedCount
+      "Monotonic count of automatic re-seeds since the last reset. Like
+       acceptedCorrectionCount it gives a consumer a well-defined edge
+       across a rate change, since reseeded is a per-tick level";
+    Integer alignmentSource
+      "Estimation.StrapdownINS.Alignment* code of the initial attitude
+       alignment in force: which sample leveled the filter and whether a
+       heading was available. Recorded so a flight log shows what the
+       attitude started from";
+    Real alignmentSpecificForceBodyFlu_m_s2[3](each unit = "m/s2")
+      "The low-pass specific force the quasi-static test reads and the
+       initial alignment levels on, zero until the first usable IMU sample";
+    Real quietElapsed_s(unit = "s")
+      "Time the low-pass IMU has reported a quasi-static vehicle: specific
+       force within tolerance of gravity and angular rate below the limit.
+       A tick that fails the test costs one tick and sustained motion drains
+       it to zero. Gates the initial alignment and the zero-velocity update";
+    Boolean pseudoPositionCorrectionAccepted
+      "True on a tick the synthetic hold-position measurement moved the
+       state";
+    Boolean zeroVelocityCorrectionAccepted
+      "True on a tick the synthetic zero-velocity measurement moved the
+       state";
   end EstimatorStatus;
 
   connector ImuSampleInput = input Avionics.ImuSample;
@@ -312,5 +346,21 @@ package Avionics
     their consistency so consumers never depend on its internal state
     representation. Filter covariance, bias states, and tangent ordering remain
     private because they have no unambiguous meaning across algorithms.</p>
-  </html>"));
+  <h4>Timestamp and freshness contract</h4>
+<p>An IMU timestamp identifies the end of its integration interval. Aiding
+packets carry capture time in the estimator clock, not transport arrival time.
+The integration duration describes the interval, and sensor latency describes
+when its packet becomes available; these are separate quantities.</p>
+<p><code>valid</code> says that a packet is usable. <code>fresh</code> indicates a
+new arrival for one estimator tick. Holding a measurement's value is acceptable;
+repeating its freshness would count correlated data as independent corrections.
+An adapter must preserve frame, units, covariance and timestamp when converting
+from an external transport.</p>
+<h4>Consumers</h4>
+<p>Guidance and control consume <code>NavigationEstimate</code> in one continuous
+local world frame. Health decisions also read <code>EstimatorStatus</code>:
+finite output numbers alone do not establish healthy position aiding. A delayed
+fusion wrapper publishes its filtered horizon state and its propagated current
+output separately; select the appropriate epoch for each consumer.</p>
+    </html>"));
 end Avionics;
